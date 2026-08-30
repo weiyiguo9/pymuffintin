@@ -178,7 +178,10 @@ energy-mesh = [-0.1, 0.4]
     native = SimpleNamespace(
         load_checkpoint=lambda path: path,
         CheckpointPhysics=lambda checkpoint: SimpleNamespace(
-            restart_density=lambda: density
+            restart_density=lambda: density,
+            structure=lambda: Structure(**{
+                "lattice": [[0.0, 3.0, 3.0], [3.0, 0.0, 3.0], [3.0, 3.0, 0.0]],
+            }),
         ),
         Structure=Structure,
         RegionalFieldLayout=FieldLayout,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib import import_module
 from itertools import product
 from pathlib import Path
@@ -249,7 +249,7 @@ class NmtoScfInput:
             raise ValueError("NMTO SCF requires a checkpoint restart density")
 
         geometry = _checkpoint_geometry(checkpoint_document)
-        structure = native.Structure(**geometry["structure"])
+        structure = physics.structure()
         density = checkpoint_document["initial"]["density"]
         charge = density["n"]
         g_vectors = [entry["g"] for entry in charge["interstitial"]["coefficients"]]
@@ -375,6 +375,7 @@ class NmtoScfResult:
     occupations: NmtoOccupations
     energy_history: FloatArray
     convergence_history: FloatArray
+    valence_normalization_history: FloatArray
 
 
 @dataclass(frozen=True)
@@ -382,6 +383,7 @@ class _NmtoIteration:
     bands: NmtoBands
     occupations: NmtoOccupations
     output_density: object
+    valence_normalization: float
 
 
 def run_nmto_scf(scf_input: NmtoScfInput) -> NmtoScfResult:
@@ -394,10 +396,12 @@ def run_nmto_scf(scf_input: NmtoScfInput) -> NmtoScfResult:
     previous_total = None
     energy_history = []
     convergence_history = []
+    valence_normalization_history = []
     for iteration in range(1, settings.max_iterations + 1):
         potential = native.build_regional_potential(density, xc=settings.xc)
         core = scf_input.core_station.solve(potential)
         current = _solve_nmto_iteration(scf_input, potential, core)
+        valence_normalization_history.append(current.valence_normalization)
         energy = native.evaluate_total_energy(
             potential,
             current.output_density,
@@ -424,6 +428,9 @@ def run_nmto_scf(scf_input: NmtoScfInput) -> NmtoScfResult:
                 occupations=current.occupations,
                 energy_history=np.asarray(energy_history),
                 convergence_history=np.asarray(convergence_history),
+                valence_normalization_history=np.asarray(
+                    valence_normalization_history
+                ),
             )
         density = mixer.step(density, current.output_density).density()
         previous_total = float(energy.total)
@@ -555,6 +562,10 @@ def _solve_nmto_iteration(
         radial_samples=radial_samples,
         symmetry=scf_input.symmetry_dataset,
     )
+    evaluator = replace(
+        evaluator,
+        basis_corrections=_represented_basis_corrections(evaluator),
+    )
     valence = assemble_nmto_regional_density(
         scf_input.native,
         scf_input.structure,
@@ -563,8 +574,42 @@ def _solve_nmto_iteration(
         scf_input.density_l_max,
         evaluator,
     )
+    represented_electrons = float(valence.electron_count())
+    valence_normalization = occupations.electron_count / represented_electrons
+    zero = valence.difference(valence)
+    valence = zero.add_scaled(valence_normalization, valence)
     output_density = valence.add_scaled(1.0, core.density())
-    return _NmtoIteration(bands, occupations, output_density)
+    return _NmtoIteration(
+        bands, occupations, output_density, valence_normalization
+    )
+
+
+def _represented_basis_corrections(evaluator: NmtoBasisEvaluator) -> ComplexArray:
+    """Align sampled basis overlaps with the analytic NMTO overlap matrices."""
+
+    axis = (np.arange(18) + 0.5) / 18
+    fractional = np.stack(
+        np.meshgrid(axis, axis, axis, indexing="ij"), axis=-1
+    ).reshape((-1, 3))
+    points = fractional @ evaluator.direct_lattice
+    volume_weight = abs(np.linalg.det(evaluator.direct_lattice)) / len(points)
+    corrections = []
+    for k_index, result in enumerate(evaluator.results):
+        large, small = evaluator._basis_values(points, k_index)
+        represented = volume_weight * (
+            large.conj().T @ large + small.conj().T @ small
+        )
+        represented = 0.5 * (represented + represented.conj().T)
+        target = 0.5 * (result.overlap + result.overlap.conj().T)
+        represented_cholesky = np.linalg.cholesky(represented)
+        target_cholesky = np.linalg.cholesky(target)
+        corrections.append(
+            np.linalg.solve(
+                represented_cholesky.conj().T,
+                target_cholesky.conj().T,
+            )
+        )
+    return np.asarray(corrections)
 
 
 def _current_radials(

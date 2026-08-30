@@ -32,7 +32,7 @@ def test_nmto_scf_mixes_until_energy_and_density_converge(monkeypatch) -> None:
     monkeypatch.setattr(
         "pymuffintin.mto.scf._solve_nmto_iteration",
         lambda scf_input, built_potential, built_core: _NmtoIteration(
-            bands, occupations, output_density
+            bands, occupations, output_density, 1.0
         ),
     )
 
@@ -95,3 +95,4 @@ def test_nmto_scf_mixes_until_energy_and_density_converge(monkeypatch) -> None:
     assert result.density is output_density
     np.testing.assert_allclose(result.energy_history, [-1.1, -1.0])
     assert calls == [None, -1.1]
+    np.testing.assert_allclose(result.valence_normalization_history, [1.0, 1.0])

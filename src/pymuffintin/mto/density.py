@@ -64,6 +64,7 @@ class NmtoBasisEvaluator:
     folded_coefficients: ComplexArray
     radial_samples: Mapping[tuple[int, int], ScalarRadialSamples]
     symmetry: SymmetryDataset | None
+    basis_corrections: ComplexArray | None = None
 
     def __post_init__(self) -> None:
         site_count = len(self.site_fractional)
@@ -80,6 +81,10 @@ class NmtoBasisEvaluator:
             raise ValueError(f"folded_coefficients must have shape {expected}")
         if self.k_weights.shape != (len(self.k_cartesian),):
             raise ValueError("k_weights must contain one value per k point")
+        if self.basis_corrections is not None and self.basis_corrections.shape != (
+            len(self.k_cartesian), primitive_size, primitive_size
+        ):
+            raise ValueError("basis_corrections must contain one square matrix per k point")
 
     def density(self, points: FloatArray) -> FloatArray:
         """Evaluate the symmetry-projected scalar valence density."""
@@ -89,17 +94,16 @@ class NmtoBasisEvaluator:
             return self._raw_density(sample_points)
         inverse_direct = np.linalg.inv(self.direct_lattice)
         fractional = np.mod(sample_points @ inverse_direct, 1.0)
-        transformed = []
+        result = np.zeros(len(sample_points), dtype=np.float64)
         for rotation, translation in zip(
             self.symmetry.rotations, self.symmetry.translations, strict=True
         ):
             inverse = np.linalg.inv(rotation)
-            transformed.append(
-                np.mod((fractional - translation) @ inverse.T, 1.0)
-                @ self.direct_lattice
+            transformed = (
+                np.mod((fractional - translation) @ inverse.T, 1.0) @ self.direct_lattice
             )
-        values = self._raw_density(np.concatenate(transformed))
-        return values.reshape((len(transformed), len(sample_points))).mean(axis=0)
+            result += self._raw_density(transformed)
+        return result / len(self.symmetry.rotations)
 
     def _raw_density(self, points: FloatArray) -> FloatArray:
         density_matrices = nmto_density_matrices(self.bands, self.occupations)
@@ -176,6 +180,10 @@ class NmtoBasisEvaluator:
             small[selected] = interpolate_nmto_basis(
                 small_nodes, self.results[k_index].lagrange_matrices
             )
+        if self.basis_corrections is not None:
+            correction = self.basis_corrections[k_index]
+            large = large @ correction
+            small = small @ correction
         return large, small
 
     def _nearest_sites(self, points: FloatArray) -> tuple[FloatArray, NDArray[np.int64]]:
@@ -240,7 +248,7 @@ def _fit_interstitial_density(
     _, sphere_sites = evaluator._nearest_sites(points)
     fractional = fractional[sphere_sites < 0]
     points = points[sphere_sites < 0]
-    density = evaluator.density(points)
+    density = evaluator._raw_density(points)
     design = np.exp(2j * np.pi * (fractional @ vectors.T))
     coefficients = np.linalg.lstsq(design, density, rcond=None)[0]
     by_vector = {tuple(vector): index for index, vector in enumerate(vectors)}
@@ -251,6 +259,10 @@ def _fit_interstitial_density(
         coefficients[opposite] = average.conj()
     zero = by_vector[(0, 0, 0)]
     coefficients[zero] = coefficients[zero].real
+    if evaluator.symmetry is not None:
+        coefficients = _symmetrize_fourier(
+            vectors, coefficients, evaluator.symmetry
+        )
     return coefficients
 
 
@@ -276,17 +288,29 @@ def _project_muffin_tin_density(
     harmonics = _complex_spherical_harmonics(directions, density_channels)
     labels = []
     offsets = [0]
-    samples = []
+    site_samples = []
     site_cartesian = evaluator.site_fractional @ evaluator.direct_lattice
     for site, center in enumerate(site_cartesian):
         mesh = evaluator.radial_samples[(site, 0)].mesh_radii
         points = (
             center[None, None, :] + mesh[:, None, None] * directions[None, :, :]
         ).reshape((-1, 3))
-        density = evaluator.density(points).reshape((len(mesh), len(directions)))
+        density = evaluator._raw_density(points).reshape((len(mesh), len(directions)))
         coefficients = contract(
             "ra,a,aL->rL", density, weights, harmonics.conj()
         )
+        site_samples.append(coefficients)
+    if evaluator.symmetry is not None:
+        site_samples = _symmetrize_muffin_tins(
+            site_samples,
+            density_channels,
+            directions,
+            weights,
+            harmonics,
+            evaluator,
+        )
+    samples = []
+    for site, coefficients in enumerate(site_samples):
         for channel, values in zip(density_channels, coefficients.T, strict=True):
             labels.append((site, channel.l, channel.m))
             samples.extend(values)
@@ -296,3 +320,85 @@ def _project_muffin_tin_density(
         np.asarray(offsets, dtype=np.int64),
         np.asarray(samples, dtype=np.complex128),
     )
+
+
+def _symmetrize_fourier(
+    vectors: NDArray[np.int64],
+    coefficients: ComplexArray,
+    symmetry: SymmetryDataset,
+) -> ComplexArray:
+    by_vector = {tuple(vector): index for index, vector in enumerate(vectors)}
+    result = np.zeros_like(coefficients)
+    for rotation, translation in zip(
+        symmetry.rotations, symmetry.translations, strict=True
+    ):
+        for target, vector in enumerate(vectors):
+            source_vector = tuple(rotation.T @ vector)
+            source = by_vector[source_vector]
+            phase = np.exp(-2j * np.pi * (vector @ translation))
+            result[target] += phase * coefficients[source]
+    result /= len(symmetry.rotations)
+    for vector, index in by_vector.items():
+        opposite = by_vector[tuple(-np.asarray(vector))]
+        average = 0.5 * (result[index] + result[opposite].conj())
+        result[index] = average
+        result[opposite] = average.conj()
+    result[by_vector[(0, 0, 0)]] = result[by_vector[(0, 0, 0)]].real
+    return result
+
+
+def _symmetrize_muffin_tins(
+    coefficients: list[ComplexArray],
+    channels: tuple[RealHarmonic, ...],
+    directions: FloatArray,
+    weights: FloatArray,
+    harmonics: ComplexArray,
+    evaluator: NmtoBasisEvaluator,
+) -> list[ComplexArray]:
+    site_count = len(evaluator.site_fractional)
+    operation_maps = []
+    cartesian_rotations = []
+    inverse_direct = np.linalg.inv(evaluator.direct_lattice)
+    for rotation, translation in zip(
+        evaluator.symmetry.rotations, evaluator.symmetry.translations, strict=True
+    ):
+        images = np.mod(
+            evaluator.site_fractional @ rotation.T + translation, 1.0
+        )
+        mapping = []
+        for image in images:
+            delta = evaluator.site_fractional - image
+            delta -= np.rint(delta)
+            mapping.append(int(np.argmin(np.linalg.norm(delta @ evaluator.direct_lattice, axis=1))))
+        operation_maps.append(np.asarray(mapping, dtype=np.int64))
+        cartesian_rotations.append(inverse_direct @ rotation.T @ evaluator.direct_lattice)
+
+    result = []
+    for target in range(site_count):
+        target_mesh = evaluator.radial_samples[(target, 0)].mesh_radii
+        averaged = np.zeros((len(target_mesh), len(directions)), dtype=np.complex128)
+        for mapping, cartesian_rotation in zip(
+            operation_maps, cartesian_rotations, strict=True
+        ):
+            source = int(np.flatnonzero(mapping == target)[0])
+            source_mesh = evaluator.radial_samples[(source, 0)].mesh_radii
+            source_coefficients = coefficients[source]
+            if not np.array_equal(source_mesh, target_mesh):
+                source_coefficients = np.stack(
+                    tuple(
+                        np.interp(target_mesh, source_mesh, values.real)
+                        + 1j * np.interp(target_mesh, source_mesh, values.imag)
+                        for values in source_coefficients.T
+                    ),
+                    axis=1,
+                )
+            source_directions = directions @ np.linalg.inv(cartesian_rotation)
+            source_harmonics = _complex_spherical_harmonics(
+                source_directions, channels
+            )
+            averaged += source_coefficients @ source_harmonics.T
+        averaged /= len(operation_maps)
+        result.append(
+            contract("ra,a,aL->rL", averaged, weights, harmonics.conj())
+        )
+    return result
