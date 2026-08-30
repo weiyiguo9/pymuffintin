@@ -46,6 +46,7 @@ $k\,N_{\mathrm{orb}}^2 + i\,N_{\mathrm{orb}} + j$ used throughout.
 | `mto` | Real-harmonic unitary spherical waves, screened slope matrices, and value-and-derivative interpolation. |
 | `regional` | Point sampling of exported interstitial-Fourier plus muffin-tin radial scalar fields. |
 | `symmetry` | Unified `SymmetryDataset` mirroring the Rust `muffintin_symmetry` IR, detected via spglib, with spgrep little-group scalar and spinor irrep helpers. |
+| `spex_log` | SPEX stdout parser: operation table (with time reversal), atom basis, and IBZ table, exported as a `libmuffintin.spexsym` v1 file for the Rust reader. Space-group classification lines are ignored. |
 | `mbpt.hf` | Fixed-orbital Fock exchange and reference-versus-trial ablation. |
 | `tensor` | Backend-neutral contraction IR and host-side linear-algebra primitives; see "Tensor backend" below. |
 
