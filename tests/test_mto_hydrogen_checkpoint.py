@@ -27,7 +27,7 @@ def _checkpoint_physics():
     return mt.CheckpointPhysics(checkpoint)
 
 
-def test_gate_b_hydrogen_overlap_error_curve_from_frozen_potential() -> None:
+def test_frozen_hydrogen_radial_omt_overlap_fractions_and_rms_trend() -> None:
     physics = _checkpoint_physics()
     frozen = physics.export_frozen_potential()
     mesh = frozen["mt_mesh_radii"]
@@ -66,7 +66,7 @@ def test_gate_b_hydrogen_overlap_error_curve_from_frozen_potential() -> None:
     assert np.all(np.diff(weighted_rms) < 0.0)
 
 
-def test_gate_c_hydrogen_nmto_matches_exported_lapw_eigenvalue() -> None:
+def test_frozen_hydrogen_n2_s_nmto_agrees_with_gamma_lapw_within_2_millihartree() -> None:
     physics = _checkpoint_physics()
     energies = np.array([-0.18, -0.14, -0.10])
     radial = physics.sample_frozen_scalar_radials("H-1", 0, energies)

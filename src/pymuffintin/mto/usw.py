@@ -51,8 +51,9 @@ IDENTITY_HARMONICS_L4 = (
 """Five symmetry-adapted density channels listed in Eq. (82) of the paper.
 
 Using this reduction in a screening inversion additionally requires the
-site-local symmetry projectors.  The unsymmetrized Gate A inversion therefore
-uses :data:`HARMONICS_L4` rather than treating this tuple as an index subset.
+site-local symmetry projectors.  The unsymmetrized Table I finite-cluster
+inversion therefore uses :data:`HARMONICS_L4` rather than treating this tuple
+as an index subset.
 """
 
 HARMONICS_L4 = tuple(
@@ -516,7 +517,7 @@ def usw_matrices_with_energy_derivative(
 
     The derivative is obtained by differentiating the radial series, bare
     structure matrix, and screening solve analytically.  Positive energy uses
-    the real Neumann continuation; the zero-energy Gate A derivative retains
+    the real Neumann continuation; the zero-energy analytic derivative retains
     its separate standing-wave limit.
     """
 
@@ -637,7 +638,7 @@ def cluster_bloch_sum(
 def lattice_cluster(
     structure: str, n_sites: int, touching_radius: float = 1.0
 ) -> NDArray[np.float64]:
-    """Return the nearest complete bcc or diamond cluster used in Gate A."""
+    """Return the cluster used by the Table I constant-density regression."""
 
     if structure == "bcc":
         lattice_constant = 4 * touching_radius / sqrt(3.0)

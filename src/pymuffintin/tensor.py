@@ -15,8 +15,8 @@ backend, either because they lack a distributed CTF-native equivalent or
 because a caller's determinism guarantee depends on numpy's exact
 eigenvector/pivot ordering. For the same reason, the deterministic QRCP
 column selection in `auxiliary/thc.py` stays entirely host-side and is not
-routed through this module: Gate 2's same-engine determinism depends on its
-exact pivot order.
+routed through this module: reproducible weighted-QRCP ISDF point selection
+depends on its exact pivot order.
 """
 
 from __future__ import annotations

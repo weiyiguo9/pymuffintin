@@ -93,7 +93,7 @@ cells and a FINUFFT reciprocal evaluator remain future work.
 
 ## MTO interpolation laboratory
 
-`pymuffintin.mto` implements the pure-Python first stage of the
+`pymuffintin.mto` implements the pure-Python
 [Nohara--Andersen](https://arxiv.org/abs/1604.08097) value-and-derivative
 construction. `usw` builds bare
 real-harmonic structure matrices, screens them by real-space cluster
@@ -111,17 +111,20 @@ square systems use `tensor.solve`/`tensor.inv`; the V&D and NMTO constructions
 never replace invertibility with a pseudoinverse.
 
 The energy convention is Hartree throughout, with the wave equation written as
-`(-nabla^2/2 - E) psi = 0`. Gate A is a geometry-only regression: with all 25
-real harmonics through `l_max=4`, it reproduces the published Table I
-constant-density interstitial-volume errors for bcc (`N_R=51`, `a=0.8t`) and
-diamond (`N_R=159`, `a=0.8t`). This is a fixed-parameter Python oracle, not a
-Rust production density representation.
+`(-nabla^2/2 - E) psi = 0`. The finite-cluster constant-density regression uses
+all 25 real harmonics through `l_max=4` and reproduces the published Table I
+interstitial-volume errors for bcc (`N_R=51`, `a=0.8t`) and diamond
+(`N_R=159`, `a=0.8t`). This is a fixed-parameter Python oracle, not a Rust
+production density representation.
 
-Gate B exercises the overlap/error curve directly on the frozen hydrogen
-regional potential. Gate C compares a second-order, s-channel NMTO at Gamma
-with the LAPW eigenvalue exported from the same frozen potential and a
-5-Hartree plane-wave cutoff. These are representation-pipeline checks rather
-than material or cross-code accuracy claims.
+The frozen-hydrogen OMT regression embeds the checkpoint's spherical radial
+potential on a fixed grid and checks the overlap fractions and decreasing
+weighted-RMS trend for potential-sphere radii 3.2, 4.0, and 4.8 Bohr. The
+frozen-hydrogen NMTO/LAPW regression compares a second-order, s-channel NMTO at
+Gamma with the lowest Gamma LAPW eigenvalue exported from the same checkpoint
+using `g-cutoff = 5.0 Bohr^-1`; the two differ by less than 2 mHa. These are
+same-checkpoint representation-pipeline regressions, not material or cross-code
+accuracy claims.
 
 ## Tensor backend
 
@@ -139,14 +142,14 @@ points by declaration, not by omission: they always run on numpy arrays,
 because they either lack a distributed CTF-native equivalent or a caller
 depends on numpy's exact ordering. The deterministic weighted-QRCP column
 selection in `auxiliary/thc.py` is not routed through `tensor` at all and
-stays fully sequential and host-side, because Gate 2's same-engine THC
-reproduction depends on its exact pivot order.
+stays fully sequential and host-side because reproducible weighted-QRCP ISDF
+point selection depends on its exact pivot order.
 
 ## Install
 
 ```sh
 # libmuffintin's native extension, built once with maturin develop
-# inside the shared venv (see libmuffintin/doc/21 Stage 1 acceptance):
+# inside the shared venv (see libmuffintin/doc/21 Python-binding acceptance):
 cd /path/to/libmuffintin/python && maturin develop
 
 cd /path/to/pymuffintin
@@ -159,13 +162,14 @@ pip install -e ".[test]"
 pytest tests/ -q
 ```
 
-Gate 3 (`tests/test_gate3.py`) exercises `libmuffintin` through
-`MuffintinAdapter` on the tracked hydrogen fixture; it is skipped
-automatically if the native extension is not built. Every other test,
-including the multi-band exchange regression in `tests/test_hf.py`, is
-backend-neutral and requires no native import. Gate 3's reported
-$E_x$ and $\Sigma_x$ differences are a pipeline consistency check on that
-fixture, not a material-accuracy claim.
+The native exchange test (`tests/test_muffintin_exchange_pipeline.py`) exercises
+`libmuffintin` through `MuffintinAdapter` on the tracked hydrogen fixture. The
+frozen-checkpoint MTO tests (`tests/test_mto_hydrogen_checkpoint.py`) also use
+the native extension. Both modules are skipped automatically when that
+extension is not built; the remaining tests, including the multi-band exchange
+regression in `tests/test_hf.py`, require no native import. The reported $E_x$
+and $\Sigma_x$ differences are a pipeline consistency check on that fixture,
+not a material-accuracy claim.
 
 ## License
 

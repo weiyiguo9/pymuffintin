@@ -63,7 +63,9 @@ def _complex_blocks(values: np.ndarray) -> list[list[list[float]]]:
     ]
 
 
-def test_gate3_hydrogen_fixed_orbital_exchange_pipeline(capsys: pytest.CaptureFixture[str]) -> None:
+def test_hydrogen_native_mpb_and_hybrid_exchange_pipeline(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     sys.path.insert(0, str(LIBMUFFINTIN / "python"))
     native = pytest.importorskip("libmuffintin")
     required_module_api = (
@@ -146,8 +148,8 @@ def test_gate3_hydrogen_fixed_orbital_exchange_pipeline(capsys: pytest.CaptureFi
     assert hybrid.sigma_x.shape == (window.n_k, 1, 1)
     assert np.all(np.isfinite(ablation.sigma_difference))
     report = {
-        "pipeline_check": True,
-        "scope": "hydrogen fixture pipeline check; not a material-accuracy claim",
+        "native_exchange_pipeline_check": True,
+        "scope": "hydrogen fixture native exchange pipeline; not a material-accuracy claim",
         "gamma_policy": "spherical_average_subtracted",
         "reference_mpb_Ex": reference.exchange_energy,
         "hybrid_mt_lri_i_thc_Ex": hybrid.exchange_energy,
@@ -157,4 +159,4 @@ def test_gate3_hydrogen_fixed_orbital_exchange_pipeline(capsys: pytest.CaptureFi
         "Sigma_x_difference_1x1": _complex_blocks(ablation.sigma_difference),
     }
     print(json.dumps(report, sort_keys=True))
-    assert '"pipeline_check": true' in capsys.readouterr().out
+    assert '"native_exchange_pipeline_check": true' in capsys.readouterr().out

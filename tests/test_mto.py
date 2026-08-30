@@ -133,7 +133,7 @@ def test_open_structure_weights_are_the_strict_minimum_norm_solution() -> None:
     np.testing.assert_allclose(weights[:, 0], np.array([1.0, -0.5, 1.0, -0.5]))
 
 
-def test_gate_a_reproduces_table_i_constant_density_volume_errors() -> None:
+def test_bcc_and_diamond_constant_density_volume_errors_match_table_i() -> None:
     cases = (
         ("bcc", 51, 0.8, 0.14),
         ("diamond", 159, 0.8, -1.17),

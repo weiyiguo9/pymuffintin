@@ -119,7 +119,7 @@ class _MpbCache:
 
 
 class MuffintinAdapter:
-    """DTO adapter over the libmuffintin scalar Stage 2 pyexport v1 API."""
+    """Adapter over libmuffintin scalar product-basis and sampling exports."""
 
     def __init__(
         self,
