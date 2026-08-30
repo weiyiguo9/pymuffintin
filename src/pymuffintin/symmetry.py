@@ -30,6 +30,7 @@ class SymmetryDataset:
 
     rotations: IntArray
     translations: FloatArray
+    time_reversals: NDArray[np.bool_]
     equivalent_atoms: IntArray
     spacegroup_number: int | None
     hermann_mauguin: str | None
@@ -60,6 +61,7 @@ def detect(
     return SymmetryDataset(
         rotations=dataset.rotations.astype(np.int64),
         translations=dataset.translations.astype(np.float64),
+        time_reversals=np.zeros(len(dataset.rotations), dtype=np.bool_),
         equivalent_atoms=dataset.crystallographic_orbits.astype(np.int64),
         spacegroup_number=int(dataset.number),
         hermann_mauguin=dataset.international,
