@@ -44,6 +44,7 @@ $k\,N_{\mathrm{orb}}^2 + i\,N_{\mathrm{orb}} + j$ used throughout.
 | `auxiliary.hybrid` | Concatenates a muffin-tin local-RI block with an interstitial THC block into one hybrid auxiliary representation, including the muffin-tin/interstitial cross block. |
 | `coulomb` | Free-space and cubic-periodic 3D continuous-source DMK-lite over tensor-product Legendre leaf densities. |
 | `mto` | Real-harmonic unitary spherical waves, screened slope matrices, and value-and-derivative interpolation. |
+| `regional` | Point sampling of exported interstitial-Fourier plus muffin-tin radial scalar fields. |
 | `mbpt.hf` | Fixed-orbital Fock exchange and reference-versus-trial ablation. |
 | `tensor` | Backend-neutral contraction IR and host-side linear-algebra primitives; see "Tensor backend" below. |
 
@@ -71,6 +72,11 @@ three-dimensional cubic cell. Its top level is the neutral, zero-mean Ewald
 decomposition: a real-space `erfc(alpha*r)/r` image sum plus the reciprocal
 `k != 0` Coulomb multiplier. Reciprocal leaf moments and target evaluation are
 dense tensor transforms in this reference implementation.
+
+`project_density` supplies the common cubic density boundary used by the
+periodic reference and fast implementations: it projects a scalar callable
+onto uniform dyadic tensor-Legendre leaves and can remove the volume-weighted
+zero mode required by the periodic Green function.
 
 Both classes are low-level density-to-potential reference kernels. They do not
 implement the q-resolved `providers.Coulomb` auxiliary-matrix protocol and are

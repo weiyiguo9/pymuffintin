@@ -9,6 +9,7 @@ from .contracts import (
     PairSamples,
     RegionalChargeExpansion,
 )
+from .regional import RegionalScalarSampler
 from .providers import Coulomb, LocalProduct, Orbitals
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "PairLayout",
     "PairSamples",
     "RegionalChargeExpansion",
+    "RegionalScalarSampler",
 ]

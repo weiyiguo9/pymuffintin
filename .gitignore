@@ -25,6 +25,7 @@ target/
 
 # Local tools and editor temporaries
 .ace-tool/
+local_experiment/
 *.swp
 *.swo
 *~
