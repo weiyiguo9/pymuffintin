@@ -98,6 +98,26 @@ def test_screened_slope_radius_symmetry_and_energy_order_invariance() -> None:
     )
 
 
+def test_positive_energy_standing_wave_slope_derivative() -> None:
+    centers = np.array([[0.0, 0.0, 0.0], [2.4, 0.0, 0.0]])
+    radii = np.array([0.7, 0.9])
+    channels = (RealHarmonic(0, 0),)
+    energy = 0.08
+    _, slope, slope_energy = usw_matrices_with_energy_derivative(
+        energy, centers, radii, channels
+    )
+    step = 1.0e-6
+    _, slope_plus = usw_matrices(energy + step, centers, radii, channels)
+    _, slope_minus = usw_matrices(energy - step, centers, radii, channels)
+    np.testing.assert_allclose(radii[:, None] * slope, (radii[:, None] * slope).T)
+    np.testing.assert_allclose(
+        slope_energy,
+        (slope_plus - slope_minus) / (2.0 * step),
+        rtol=2.0e-8,
+        atol=2.0e-10,
+    )
+
+
 def test_open_structure_weights_are_the_strict_minimum_norm_solution() -> None:
     localized = np.zeros((2, 4, 1))
     extended = np.array(

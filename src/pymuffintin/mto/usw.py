@@ -231,10 +231,44 @@ def _decaying_hankel_with_energy_derivative(
     return value, radial, value_energy, radial_energy
 
 
+def _standing_neumann_with_energy_derivative(
+    l: int, energy: float, radius: NDArray[np.float64]
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]:
+    """Return the real positive-energy Neumann envelope and derivatives."""
+
+    r = np.asarray(radius, dtype=float)
+    wave_number = sqrt(2.0 * energy)
+    n_minus_one, n_minus_one_radial = _regular_bessel(0, energy, r)
+    values = [-np.cos(wave_number * r) / r]
+    previous = n_minus_one
+    for degree in range(l):
+        following = (2 * degree + 1) * values[-1] / r - 2.0 * energy * previous
+        previous = values[-1]
+        values.append(following)
+    value = values[l]
+    lower = n_minus_one if l == 0 else values[l - 1]
+    lower_radial = n_minus_one_radial
+    if l > 0:
+        lower_lower = n_minus_one if l == 1 else values[l - 2]
+        lower_radial = 2.0 * energy * lower_lower - l * lower / r
+    radial = 2.0 * energy * lower - (l + 1) * value / r
+    value_energy = r * lower
+    radial_energy = lower + r * lower_radial
+    return value, radial, value_energy, radial_energy
+
+
 def _radial_at_sphere(
     l: int, energy: float, radius: NDArray[np.float64]
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     j, j_prime = _regular_bessel(l, energy, radius)
+    if energy > 0.0:
+        n, _, _, _ = _standing_neumann_with_energy_derivative(l, energy, radius)
+        return j, j_prime, n
     h, _ = _decaying_hankel(l, energy, radius)
     q = sqrt(-2.0 * energy)
     power = ((-1) ** l) * q ** (2 * l + 1)
@@ -254,6 +288,11 @@ def _radial_at_sphere_with_energy_derivative(
     j, j_radial, j_energy, j_radial_energy = _regular_bessel_with_energy_derivative(
         l, energy, radius
     )
+    if energy > 0.0:
+        n, _, n_energy, _ = _standing_neumann_with_energy_derivative(
+            l, energy, radius
+        )
+        return j, j_radial, n, j_energy, j_radial_energy, n_energy
     h, _, h_energy, _ = _decaying_hankel_with_energy_derivative(l, energy, radius)
     q = sqrt(-2.0 * energy)
     exponent = 2 * l + 1
@@ -300,8 +339,8 @@ def bare_structure_matrix(
 ) -> NDArray[np.float64]:
     """Build the analytical bare structure matrix ``B(epsilon)``.
 
-    ``energy`` must be non-positive.  Every site carries the same ordered
-    real-harmonic channel set.  ``standing_wave=True`` retains the analytic
+    Every site carries the same ordered real-harmonic channel set.  Positive
+    energy selects the real Neumann branch.  ``standing_wave=True`` retains the analytic
     Neumann part used to evaluate ``dS/depsilon`` at zero; ordinary negative-
     energy USWs use the default decaying Hankel branch.
     """
@@ -311,8 +350,9 @@ def bare_structure_matrix(
     n_channel = len(channels)
     size = n_site * n_channel
     result = np.zeros((size, size), dtype=float)
-    q = sqrt(-2.0 * energy)
-    if not standing_wave:
+    standing = standing_wave or energy > 0.0
+    if not standing:
+        q = sqrt(-2.0 * energy)
         for site in range(n_site):
             offset = site * n_channel
             for local, channel in enumerate(channels):
@@ -334,10 +374,22 @@ def bare_structure_matrix(
                 if power < 0 or power % 2:
                     continue
                 phase = (-1) ** (row_channel.l - translation.l)
-                kernel[a, b, c] = 4 * pi * phase * q**power * gaunt[a, b, c]
+                kernel[a, b, c] = (
+                    4
+                    * pi
+                    * phase
+                    * (-2.0 * energy) ** (power // 2)
+                    * gaunt[a, b, c]
+                )
     for c, translation in enumerate(translation_channels):
-        radial, _ = _decaying_hankel(translation.l, energy, distance)
-        if standing_wave:
+        if energy > 0.0:
+            radial, _, _, _ = _standing_neumann_with_energy_derivative(
+                translation.l, energy, distance
+            )
+        else:
+            radial, _ = _decaying_hankel(translation.l, energy, distance)
+        if standing_wave and energy <= 0.0:
+            q = sqrt(-2.0 * energy)
             regular, _ = _regular_bessel(translation.l, energy, distance)
             radial = radial - ((-1) ** translation.l) * q ** (
                 2 * translation.l + 1
@@ -362,16 +414,17 @@ def _bare_structure_matrix_with_energy_derivative(
     size = n_site * n_channel
     result = np.zeros((size, size), dtype=float)
     derivative = np.zeros_like(result)
-    q = sqrt(-2.0 * energy)
-    for site in range(n_site):
-        offset = site * n_channel
-        for local, channel in enumerate(channels):
-            exponent = 2 * channel.l + 1
-            sign = (-1) ** channel.l
-            result[offset + local, offset + local] = sign * q**exponent
-            derivative[offset + local, offset + local] = (
-                -sign * exponent * q ** (exponent - 2)
-            )
+    if energy < 0.0:
+        q = sqrt(-2.0 * energy)
+        for site in range(n_site):
+            offset = site * n_channel
+            for local, channel in enumerate(channels):
+                exponent = 2 * channel.l + 1
+                sign = (-1) ** channel.l
+                result[offset + local, offset + local] = sign * q**exponent
+                derivative[offset + local, offset + local] = (
+                    -sign * exponent * q ** (exponent - 2)
+                )
 
     row_site, column_site = np.nonzero(~np.eye(n_site, dtype=bool))
     displacement = sites[row_site] - sites[column_site]
@@ -389,17 +442,24 @@ def _bare_structure_matrix_with_energy_derivative(
                     continue
                 phase = (-1) ** (row_channel.l - translation.l)
                 prefactor = 4 * pi * phase * gaunt[a, b, c]
-                kernel[a, b, c] = prefactor * q**exponent
+                kernel[a, b, c] = prefactor * (-2.0 * energy) ** (exponent // 2)
                 if exponent:
                     kernel_energy[a, b, c] = (
-                        -prefactor * exponent * q ** (exponent - 2)
+                        -prefactor
+                        * exponent
+                        * (-2.0 * energy) ** (exponent // 2 - 1)
                     )
     radial_angular = angular.copy()
     radial_energy_angular = angular.copy()
     for c, translation in enumerate(translation_channels):
-        radial, _, radial_energy, _ = _decaying_hankel_with_energy_derivative(
-            translation.l, energy, distance
-        )
+        if energy > 0.0:
+            radial, _, radial_energy, _ = _standing_neumann_with_energy_derivative(
+                translation.l, energy, distance
+            )
+        else:
+            radial, _, radial_energy, _ = _decaying_hankel_with_energy_derivative(
+                translation.l, energy, distance
+            )
         radial_angular[:, c] *= radial
         radial_energy_angular[:, c] *= radial_energy
     blocks = contract("abc,pc->pab", kernel, radial_angular)
@@ -455,9 +515,9 @@ def usw_matrices_with_energy_derivative(
     """Return ``M(E)``, ``S(E)``, and the exact Hartree derivative ``dS/dE``.
 
     The derivative is obtained by differentiating the radial series, bare
-    structure matrix, and screening solve analytically.  This method is for
-    strictly negative energies; the zero-energy Gate A derivative retains its
-    separate standing-wave limit.
+    structure matrix, and screening solve analytically.  Positive energy uses
+    the real Neumann continuation; the zero-energy Gate A derivative retains
+    its separate standing-wave limit.
     """
 
     sites = np.asarray(centers, dtype=float)
@@ -528,7 +588,12 @@ def evaluate_usw(
         distance = np.linalg.norm(displacement, axis=1)
         angular = real_spherical_harmonics(displacement, channels)
         for local, channel in enumerate(channels):
-            radial, _ = _decaying_hankel(channel.l, energy, distance)
+            if energy > 0.0:
+                radial, _, _, _ = _standing_neumann_with_energy_derivative(
+                    channel.l, energy, distance
+                )
+            else:
+                radial, _ = _decaying_hankel(channel.l, energy, distance)
             envelopes[:, site * len(channels) + local] = radial * angular[:, local]
     return contract("pi,ij->pj", envelopes, coefficients)
 
