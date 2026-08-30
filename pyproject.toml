@@ -10,7 +10,13 @@ readme = "README.md"
 license = "Apache-2.0"
 authors = [{name = "weiyiguo9"}]
 requires-python = ">=3.10"
-dependencies = ["numpy", "opt_einsum"]
+dependencies = [
+    "numpy",
+    "opt_einsum",
+    "sparse-ir>=2.1.2",
+    "spglib>=2.7",
+    "spgrep>=0.7",
+]
 
 [project.optional-dependencies]
 nufft = ["finufft>=2.5.1"]
