@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import numpy as np
 import spglib
 import spgrep
+from numpy.typing import NDArray
 
 from .contracts import ComplexArray, FloatArray, IntArray
 
