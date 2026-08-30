@@ -17,6 +17,7 @@ from ..contracts import (
     PairSamples,
     RegionalChargeExpansion,
 )
+from ..tensor import contract, pinv
 
 
 _SCHEMA = "libmuffintin.pyexport"
@@ -240,9 +241,10 @@ class MuffintinAdapter:
             k_index = int(k_indices[map_index])
             kq_index = int(kq_indices[map_index])
             phase = np.exp(1j * (points @ g_wrap[map_index]))
-            block = (
-                large[:, kq_index, :].conj()[:, :, None] * large[:, k_index, :][:, None, :]
-                + small[:, kq_index, :].conj()[:, :, None] * small[:, k_index, :][:, None, :]
+            block = contract(
+                "pi,pj->pij", large[:, kq_index, :].conj(), large[:, k_index, :]
+            ) + contract(
+                "pi,pj->pij", small[:, kq_index, :].conj(), small[:, k_index, :]
             )
             start = k_index * layout.n_orb * layout.n_orb
             stop = start + layout.n_orb * layout.n_orb
@@ -347,14 +349,15 @@ class MuffintinAdapter:
             matrix = reference_matrix.copy()
         else:
             reference_coefficients = cached.representation.coefficients
-            pair_kernel = (
-                reference_coefficients.conj()
-                @ reference_matrix
-                @ reference_coefficients.T
+            pair_kernel = contract(
+                "pa,ab,qb->pq",
+                reference_coefficients.conj(),
+                reference_matrix,
+                reference_coefficients,
             )
             trial_map = representation.coefficients.conj()
-            projector = np.linalg.pinv(trial_map)
-            matrix = projector @ pair_kernel @ projector.conj().T
+            projector = pinv(trial_map)
+            matrix = contract("mp,pq,nq->mn", projector, pair_kernel, projector.conj())
             matrix = np.asarray(0.5 * (matrix + matrix.conj().T), dtype=np.complex128)
         return CoulombBlock(
             q_index=representation.q_index,

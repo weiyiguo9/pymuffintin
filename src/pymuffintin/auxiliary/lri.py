@@ -7,6 +7,7 @@ from ..contracts import (
     PairSamples,
     RegionalChargeExpansion,
 )
+from ..tensor import contract, eigh
 
 
 def muffin_tin_lri(samples: PairSamples, *, cutoff: float) -> AuxiliaryRepresentation:
@@ -19,8 +20,8 @@ def muffin_tin_lri(samples: PairSamples, *, cutoff: float) -> AuxiliaryRepresent
     for site in np.unique(samples.site_indices[samples.site_indices >= 0]):
         selected = samples.site_indices == site
         weighted_pairs = np.sqrt(samples.weights[selected])[:, None] * samples.values[selected]
-        overlap = weighted_pairs.conj().T @ weighted_pairs
-        eigenvalues, eigenvectors = np.linalg.eigh(overlap)
+        overlap = contract("pa,pb->ab", weighted_pairs.conj(), weighted_pairs)
+        eigenvalues, eigenvectors = eigh(overlap)
         order = np.argsort(eigenvalues)[::-1]
         eigenvalues = np.maximum(eigenvalues[order], 0.0)
         eigenvectors = eigenvectors[:, order]

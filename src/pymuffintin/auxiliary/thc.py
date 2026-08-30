@@ -11,6 +11,7 @@ from ..contracts import (
     RegionalChargeExpansion,
     require_array,
 )
+from ..tensor import lstsq
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,9 @@ class IsdfSelection:
 
 
 def _deterministic_qrcp_columns(matrix: NDArray[np.complex128], rank: int) -> NDArray[np.int64]:
+    """Sequential, host-only by design: Gate 2's same-engine THC reproduction
+    (doc 21 section 7) depends on this exact pivot order, so it is not routed
+    through `tensor.contract` or a backend-dispatched primitive."""
     work = np.array(matrix, dtype=np.complex128, copy=True)
     norms = np.sum(np.abs(work) ** 2, axis=0)
     pivots = np.empty(rank, dtype=np.int64)
@@ -63,7 +67,7 @@ def weighted_isdf(
     weighted = np.sqrt(weights)[:, None] * values
     pivots = _deterministic_qrcp_columns(weighted.T, rank)
     selected = weighted[pivots]
-    solution, _, _, _ = np.linalg.lstsq(selected.T, weighted.T, rcond=None)
+    solution = lstsq(selected.T, weighted.T)
     zeta = np.asarray(solution.T, dtype=np.complex128)
     residual = float(np.linalg.norm(weighted - zeta @ selected))
     return IsdfSelection(point_indices=pivots, zeta=zeta, residual_norm=residual)

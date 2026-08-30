@@ -43,6 +43,25 @@ $k\,N_{\mathrm{orb}}^2 + i\,N_{\mathrm{orb}} + j$ used throughout.
 | `auxiliary.thc` | Weighted deterministic QRCP interpolative separable density fitting (ISDF) for the interstitial region. |
 | `auxiliary.hybrid` | Concatenates a muffin-tin local-RI block with an interstitial THC block into one hybrid auxiliary representation, including the muffin-tin/interstitial cross block. |
 | `mbpt.hf` | Fixed-orbital Fock exchange and reference-versus-trial ablation. |
+| `tensor` | Backend-neutral contraction IR and host-side linear-algebra primitives; see "Tensor backend" below. |
+
+## Tensor backend
+
+All fixed-structure multilinear contractions in `auxiliary/` and `mbpt/`
+route through `pymuffintin.tensor.contract`, an `opt_einsum`-backed IR that
+compiles and caches one expression per `(subscript, operand shapes)` pair
+and evaluates it with backend dispatch following the operands' own array
+type. A future CTF backend plugs in by registering an object with a `name`
+and `asarray`/`to_host` methods (`tensor.register_backend`,
+`tensor.set_backend`); no call site changes.
+
+`tensor.eigh`, `tensor.lstsq`, and `tensor.pinv` are host-side gather
+points by declaration, not by omission: they always run on numpy arrays,
+because they either lack a distributed CTF-native equivalent or a caller
+depends on numpy's exact ordering. The deterministic weighted-QRCP column
+selection in `auxiliary/thc.py` is not routed through `tensor` at all and
+stays fully sequential and host-side, because Gate 2's same-engine THC
+reproduction depends on its exact pivot order.
 
 ## Install
 

@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 authors = [{name = "weiyiguo9"}]
 requires-python = ">=3.10"
-dependencies = ["numpy"]
+dependencies = ["numpy", "opt_einsum"]
 
 [project.optional-dependencies]
 test = ["pytest"]

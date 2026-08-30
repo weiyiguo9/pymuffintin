@@ -9,6 +9,7 @@ from ..contracts import (
     ExchangeResult,
     FixedOccupation,
 )
+from ..tensor import contract
 
 
 def fixed_orbital_exchange(
@@ -47,24 +48,18 @@ def fixed_orbital_exchange(
 
         # vertices[k, i, j] pairs band i at k-q (conjugated) with band j at k
         # (the MuffintinAdapter.sample convention, doc 21 section 4.2). The
-        # occupied/internal band summed against the Coulomb block is i (at
-        # k-q); the external sigma indices are j, j' (at k).
+        # occupied/internal band contracted against the Coulomb block is i
+        # (at k-q, gathered into f_sel); the external sigma indices are j
+        # and l (at k) in 'ki,kija,ab,kilb->kjl'.
         vertices = representation.coefficients.reshape(
             layout.n_k, layout.n_orb, layout.n_orb, representation.n_auxiliary
         )
         q_weight = occupation.q_weights[q_index]
-        for k_index in range(layout.n_k):
-            occupied_k = occupation.k_minus_q_indices[q_index, k_index]
-            for j in range(layout.n_orb):
-                for j_prime in range(layout.n_orb):
-                    value = 0.0j
-                    for i in range(layout.n_orb):
-                        pair = vertices[k_index, i, j]
-                        pair_prime = vertices[k_index, i, j_prime]
-                        value += occupation.values[occupied_k, i] * (
-                            pair.conj() @ block.matrix @ pair_prime
-                        )
-                    sigma[k_index, j, j_prime] -= q_weight * value
+        occupied_k = occupation.k_minus_q_indices[q_index]
+        f_sel = occupation.values[occupied_k]
+        sigma -= q_weight * contract(
+            "ki,kija,ab,kilb->kjl", f_sel, vertices.conj(), block.matrix, vertices
+        )
 
     exchange_energy = 0.0
     for k_index in range(layout.n_k):
