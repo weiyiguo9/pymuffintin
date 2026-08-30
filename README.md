@@ -173,11 +173,8 @@ pytest tests/ -q
 The native exchange test (`tests/test_muffintin_exchange_pipeline.py`) exercises
 `libmuffintin` through `MuffintinAdapter` on the tracked hydrogen fixture. The
 frozen-checkpoint MTO tests (`tests/test_mto_hydrogen_checkpoint.py`) also use
-the native extension. Both modules are skipped automatically when that
-extension is not built; the remaining tests, including the multi-band exchange
-regression in `tests/test_hf.py`, require no native import. The reported $E_x$
-and $\Sigma_x$ differences are a pipeline consistency check on that fixture,
-not a material-accuracy claim.
+the native extension. Contributor-facing test scope and fixture interpretation
+are documented in [AGENTS.md](AGENTS.md).
 
 ## License
 
