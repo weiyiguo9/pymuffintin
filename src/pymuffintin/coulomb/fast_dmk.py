@@ -10,7 +10,7 @@ kernel is integrated against individual leaves.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import ceil, floor
+from math import ceil
 from typing import TypeAlias
 
 import numpy as np
@@ -225,38 +225,14 @@ class FastDmk:
         interpolation_nodes: FloatArray,
         dtype: np.dtype[np.float64] | np.dtype[np.complex128],
     ) -> tuple[tuple[dict[CellIndex, EquivalentArray], ...], int]:
-        levels: list[dict[CellIndex, EquivalentArray]] = [
-            {} for _ in range(self.max_level + 1)
-        ]
-        for density, key in zip(self.densities, self.leaf_keys, strict=True):
-            level, x, y, z = key
-            levels[level][(x, y, z)] = _leaf_source_transform(
-                density,
-                interpolation_nodes,
-                self.source_quadrature_order,
-                dtype,
-            )
-
-        transfer = _child_source_transfer_matrices(interpolation_nodes)
-        upward_count = 0
-        for level in range(self.max_level, 0, -1):
-            for child in sorted(levels[level]):
-                parent = tuple(index // 2 for index in child)
-                bits = tuple(index - 2 * parent_axis for index, parent_axis in zip(child, parent))
-                matrices = tuple(transfer[bit] for bit in bits)
-                contribution = contract(
-                    "ia,jb,kc,abc->ijk",
-                    matrices[0],
-                    matrices[1],
-                    matrices[2],
-                    levels[level][child],
-                )
-                if parent in levels[level - 1]:
-                    levels[level - 1][parent] += contribution
-                else:
-                    levels[level - 1][parent] = np.asarray(contribution, dtype=dtype)
-                upward_count += 1
-        return tuple(levels), upward_count
+        return _build_source_hierarchy(
+            self.densities,
+            self.leaf_keys,
+            self.max_level,
+            interpolation_nodes,
+            self.source_quadrature_order,
+            dtype,
+        )
 
     def _add_local_remainders(
         self,
@@ -450,6 +426,48 @@ def _leaf_source_transform(
     )
 
 
+def _build_source_hierarchy(
+    densities: tuple[LeafDensity, ...],
+    leaf_keys: tuple[CellKey, ...],
+    max_level: int,
+    interpolation_nodes: FloatArray,
+    quadrature_order: int,
+    dtype: np.dtype[np.float64] | np.dtype[np.complex128],
+) -> tuple[tuple[dict[CellIndex, EquivalentArray], ...], int]:
+    levels: list[dict[CellIndex, EquivalentArray]] = [
+        {} for _ in range(max_level + 1)
+    ]
+    for density, key in zip(densities, leaf_keys, strict=True):
+        level, x, y, z = key
+        levels[level][(x, y, z)] = _leaf_source_transform(
+            density,
+            interpolation_nodes,
+            quadrature_order,
+            dtype,
+        )
+
+    transfer = _child_source_transfer_matrices(interpolation_nodes)
+    upward_count = 0
+    for level in range(max_level, 0, -1):
+        for child in sorted(levels[level]):
+            parent = tuple(index // 2 for index in child)
+            bits = tuple(index - 2 * parent_axis for index, parent_axis in zip(child, parent))
+            matrices = tuple(transfer[bit] for bit in bits)
+            contribution = contract(
+                "ia,jb,kc,abc->ijk",
+                matrices[0],
+                matrices[1],
+                matrices[2],
+                levels[level][child],
+            )
+            if parent in levels[level - 1]:
+                levels[level - 1][parent] += contribution
+            else:
+                levels[level - 1][parent] = np.asarray(contribution, dtype=dtype)
+            upward_count += 1
+    return tuple(levels), upward_count
+
+
 def _child_source_transfer_matrices(nodes: FloatArray) -> tuple[FloatArray, FloatArray]:
     child_points = (-0.5 + 0.5 * nodes, 0.5 + 0.5 * nodes)
     return tuple(_lagrange_matrix(nodes, points).T for points in child_points)  # type: ignore[return-value]
@@ -526,26 +544,12 @@ def _translate_band(
             )
             matrices_by_node = relative_matrices.get(relative)
             if matrices_by_node is None:
-                target_center = _cell_center(root, level, target_cell)
-                source_center = _cell_center(root, level, source_cell)
-                matrices: list[tuple[FloatArray, FloatArray, FloatArray]] = []
-                for inverse_length in band.nodes:
-                    axis_matrices = []
-                    for axis in range(3):
-                        target_points = (
-                            target_center[axis] + 0.5 * width * interpolation_nodes
-                        )
-                        source_points = (
-                            source_center[axis] + 0.5 * width * interpolation_nodes
-                        )
-                        axis_matrices.append(
-                            np.exp(
-                                -float(inverse_length) ** 2
-                                * np.square(target_points[:, None] - source_points[None, :])
-                            )
-                        )
-                    matrices.append((axis_matrices[0], axis_matrices[1], axis_matrices[2]))
-                matrices_by_node = tuple(matrices)
+                matrices_by_node = _gaussian_translation_matrices(
+                    width,
+                    relative,
+                    band.nodes,
+                    interpolation_nodes,
+                )
                 relative_matrices[relative] = matrices_by_node
             source_values = sources[source_cell]
             for weight, matrices in zip(band.weights, matrices_by_node, strict=True):
@@ -558,6 +562,28 @@ def _translate_band(
                 )
             interaction_count += 1
     return translated, interaction_count
+
+
+def _gaussian_translation_matrices(
+    width: float,
+    relative: CellIndex,
+    inverse_lengths: FloatArray,
+    interpolation_nodes: FloatArray,
+) -> tuple[tuple[FloatArray, FloatArray, FloatArray], ...]:
+    matrices: list[tuple[FloatArray, FloatArray, FloatArray]] = []
+    for inverse_length in inverse_lengths:
+        axis_matrices = []
+        for axis in range(3):
+            target_points = width * (relative[axis] + 0.5 * interpolation_nodes)
+            source_points = 0.5 * width * interpolation_nodes
+            axis_matrices.append(
+                np.exp(
+                    -float(inverse_length) ** 2
+                    * np.square(target_points[:, None] - source_points[None, :])
+                )
+            )
+        matrices.append((axis_matrices[0], axis_matrices[1], axis_matrices[2]))
+    return tuple(matrices)
 
 
 def _box_distance_cells(left: CellIndex, right: CellIndex, width: float) -> float:

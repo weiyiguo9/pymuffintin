@@ -1,6 +1,7 @@
 from .density import LeafDensity
 from .dmk import ContinuousDmk
 from .fast_dmk import FastDmk, FastDmkWork
+from .fast_periodic_dmk import FastPeriodicDmk, FastPeriodicDmkWork
 from .kernels import CoulombKernelSplit
 from .periodic_dmk import PeriodicDmk
 from .tree import AdaptiveTree, LeafBox
@@ -11,6 +12,8 @@ __all__ = [
     "CoulombKernelSplit",
     "FastDmk",
     "FastDmkWork",
+    "FastPeriodicDmk",
+    "FastPeriodicDmkWork",
     "LeafBox",
     "LeafDensity",
     "PeriodicDmk",
