@@ -16,6 +16,7 @@ dependencies = [
     "sparse-ir>=2.1.2",
     "spglib>=2.7",
     "spgrep>=0.7",
+    "tomli>=2; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
