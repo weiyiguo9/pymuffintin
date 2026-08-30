@@ -599,6 +599,94 @@ def evaluate_usw(
     return contract("pi,ij->pj", envelopes, coefficients)
 
 
+def bloch_fold_usw_coefficients(
+    coefficients: NDArray[np.float64],
+    translations: NDArray[np.float64],
+    site_count: int,
+    channel_count: int,
+    k_cartesian: NDArray[np.float64],
+) -> NDArray[np.complex128]:
+    """Fold translated screened-USW columns into primitive-cell columns."""
+
+    cells = np.asarray(translations, dtype=float)
+    expected = len(cells) * site_count * channel_count
+    if np.asarray(coefficients).shape != (expected, expected):
+        raise ValueError("USW coefficient matrix does not match the translated basis")
+    phase = np.exp(1j * (cells @ np.asarray(k_cartesian, dtype=float)))
+    folding = np.zeros(
+        (expected, site_count * channel_count),
+        dtype=np.complex128,
+    )
+    identity = np.eye(channel_count)
+    for cell in range(len(cells)):
+        for site in range(site_count):
+            source = (cell * site_count + site) * channel_count
+            target = site * channel_count
+            folding[
+                source : source + channel_count,
+                target : target + channel_count,
+            ] = phase[cell] * identity
+    return coefficients @ folding
+
+
+def evaluate_folded_usw(
+    energy: float,
+    points: NDArray[np.float64],
+    centers: NDArray[np.float64],
+    channels: Sequence[RealHarmonic],
+    folded_coefficients: NDArray[np.complex128],
+) -> NDArray[np.complex128]:
+    """Evaluate already-folded primitive-cell USWs at interstitial points."""
+
+    sites = np.asarray(centers, dtype=float)
+    sample_points = np.asarray(points, dtype=float)
+    channel_count = len(channels)
+    if folded_coefficients.shape[0] != len(sites) * channel_count:
+        raise ValueError("folded coefficients do not match centers and channels")
+    envelopes = np.empty((len(sample_points), len(sites) * channel_count))
+    for site, center in enumerate(sites):
+        displacement = sample_points - center
+        distance = np.linalg.norm(displacement, axis=1)
+        angular = real_spherical_harmonics(displacement, channels)
+        for local, channel in enumerate(channels):
+            if energy > 0.0:
+                radial, _, _, _ = _standing_neumann_with_energy_derivative(
+                    channel.l, energy, distance
+                )
+            else:
+                radial, _ = _decaying_hankel(channel.l, energy, distance)
+            envelopes[:, site * channel_count + local] = radial * angular[:, local]
+    return contract("pi,ij->pj", envelopes, folded_coefficients)
+
+
+def evaluate_bloch_usw(
+    energy: float,
+    points: NDArray[np.float64],
+    centers: NDArray[np.float64],
+    radii: NDArray[np.float64],
+    channels: Sequence[RealHarmonic],
+    translations: NDArray[np.float64],
+    site_count: int,
+    k_cartesian: NDArray[np.float64],
+) -> NDArray[np.complex128]:
+    """Evaluate primitive-cell Bloch sums of cluster USWs.
+
+    ``centers`` must use translation-major, site-major ordering.  Folding the
+    screened coefficient columns before evaluating the envelopes avoids
+    materializing every translated USW at every point.
+    """
+
+    coefficients, _ = usw_matrices(energy, centers, radii, channels)
+    folded = bloch_fold_usw_coefficients(
+        coefficients,
+        translations,
+        site_count,
+        len(channels),
+        k_cartesian,
+    )
+    return evaluate_folded_usw(energy, points, centers, channels, folded)
+
+
 def bloch_sum(
     translated_matrices: NDArray[np.float64],
     translations: NDArray[np.float64],
