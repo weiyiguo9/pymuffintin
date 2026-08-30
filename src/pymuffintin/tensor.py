@@ -9,7 +9,7 @@ A future CTF backend needs to supply only `asarray`/`to_host` through the
 `Backend` protocol below; `opt_einsum` then dispatches the same expression to
 `ctf.einsum`/`ctf.tensordot` on ctf arrays without any change at call sites.
 
-`eigh`, `lstsq`, and `pinv` are host-side by declaration, not by omission:
+`eigh`, `solve`, `inv`, `lstsq`, and `pinv` are host-side by declaration, not by omission:
 they run sequentially on host (numpy) arrays regardless of the active
 backend, either because they lack a distributed CTF-native equivalent or
 because a caller's determinism guarantee depends on numpy's exact
@@ -99,6 +99,17 @@ def eigh(a: NDArray) -> tuple[NDArray, NDArray]:
     """Host-side Hermitian eigendecomposition. See the module docstring."""
     host = get_backend().to_host(a)
     return np.linalg.eigh(host)
+
+
+def solve(a: NDArray, b: NDArray) -> NDArray:
+    """Host-side exact solve of a square linear system. See the module docstring."""
+    backend = get_backend()
+    return np.linalg.solve(backend.to_host(a), backend.to_host(b))
+
+
+def inv(a: NDArray) -> NDArray:
+    """Host-side inverse of a nonsingular square matrix. See the module docstring."""
+    return np.linalg.inv(get_backend().to_host(a))
 
 
 def lstsq(a: NDArray, b: NDArray) -> NDArray:

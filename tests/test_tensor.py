@@ -55,6 +55,17 @@ def test_expression_cache_returns_the_same_compiled_object_for_repeated_shapes()
     assert first is second
 
 
+def test_strict_host_linear_algebra_primitives() -> None:
+    matrix = np.array([[4.0, 1.0], [2.0, 3.0]])
+    right_hand_side = np.array([9.0, 8.0])
+
+    solution = tensor.solve(matrix, right_hand_side)
+    inverse = tensor.inv(matrix)
+
+    np.testing.assert_allclose(matrix @ solution, right_hand_side)
+    np.testing.assert_allclose(matrix @ inverse, np.eye(2), atol=1.0e-14)
+
+
 def test_registry_round_trip_and_contract_on_a_registered_backend() -> None:
     backend = _TaggingBackend()
     tensor.register_backend(backend)
