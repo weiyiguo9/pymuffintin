@@ -24,14 +24,19 @@ def _settings(*, symmetry: bool = True) -> NmtoScfSettings:
 
 def test_python_input_detects_diamond_symmetry_by_default() -> None:
     prepared = NmtoScfInput.from_python(
+        native=SimpleNamespace(),
         structure=object(),
         field_layout=object(),
         initial_density=object(),
+        core_station=object(),
         lattice=DIAMOND_LATTICE,
         site_ids=("C-1", "C-2"),
         atomic_numbers=(6, 6),
         fractional_positions=DIAMOND_POSITIONS,
         muffin_tin_radii=(1.4, 1.4),
+        g_vectors=((0, 0, 0),),
+        density_l_max=0,
+        radial_equations=("scalar-koelling-harmon",) * 2,
         settings=_settings(),
     )
 
@@ -41,14 +46,19 @@ def test_python_input_detects_diamond_symmetry_by_default() -> None:
 
 def test_python_input_can_disable_symmetry() -> None:
     prepared = NmtoScfInput.from_python(
+        native=SimpleNamespace(),
         structure=object(),
         field_layout=object(),
         initial_density=object(),
+        core_station=object(),
         lattice=DIAMOND_LATTICE,
         site_ids=("C-1", "C-2"),
         atomic_numbers=(6, 6),
         fractional_positions=DIAMOND_POSITIONS,
         muffin_tin_radii=(1.4, 1.4),
+        g_vectors=((0, 0, 0),),
+        density_l_max=0,
+        radial_equations=("scalar-koelling-harmon",) * 2,
         settings=_settings(symmetry=False),
     )
 
@@ -130,6 +140,9 @@ mesh = [2, 2, 2]
 [task.scf.basis]
 l-max = 2
 
+[task.scf.basis.channels.C]
+core = ["1s"]
+
 [task.scf.occupations]
 temperature = 0.02
 
@@ -169,6 +182,9 @@ energy-mesh = [-0.1, 0.4]
         ),
         Structure=Structure,
         RegionalFieldLayout=FieldLayout,
+        CoreState=lambda *values: values,
+        CoreSite=lambda *values: values,
+        CoreStation=lambda sites: sites,
     )
 
     prepared = NmtoScfInput.from_toml(input_path, native=native)
@@ -178,3 +194,4 @@ energy-mesh = [-0.1, 0.4]
     assert prepared.symmetry_dataset is not None
     assert prepared.settings.energy_mesh == (-0.1, 0.4)
     assert prepared.field_layout.g_vectors == [[0, 0, 0]]
+    assert len(prepared.core_station) == 2

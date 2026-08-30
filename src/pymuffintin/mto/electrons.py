@@ -49,6 +49,7 @@ class NmtoOccupations:
     values: FloatArray
     electron_count: float
     band_energy: float
+    minus_temperature_entropy: float = 0.0
 
     def __post_init__(self) -> None:
         if self.values.ndim != 2:
@@ -61,6 +62,8 @@ class NmtoOccupations:
             raise ValueError("electron_count must be finite and non-negative")
         if not np.isfinite(self.band_energy):
             raise ValueError("band_energy must be finite")
+        if not np.isfinite(self.minus_temperature_entropy):
+            raise ValueError("minus_temperature_entropy must be finite")
 
 
 def _normalized_k_weights(k_weights: FloatArray, n_k: int) -> FloatArray:
@@ -145,11 +148,21 @@ def fermi_dirac_occupations(
     values = occupations_at(chemical_potential)
     actual_count = float(contract("k,kb->", weights, values))
     band_energy = float(contract("k,kb,kb->", weights, values, band_energies))
+    probabilities = values / state_degeneracy
+    entropy_terms = np.zeros_like(probabilities)
+    interior = (probabilities > 0.0) & (probabilities < 1.0)
+    entropy_terms[interior] = -(
+        probabilities[interior] * np.log(probabilities[interior])
+        + (1.0 - probabilities[interior])
+        * np.log(1.0 - probabilities[interior])
+    )
+    entropy = state_degeneracy * float(contract("k,kb->", weights, entropy_terms))
     return NmtoOccupations(
         chemical_potential=chemical_potential,
         values=np.asarray(values, dtype=np.float64),
         electron_count=actual_count,
         band_energy=band_energy,
+        minus_temperature_entropy=-temperature * entropy,
     )
 
 

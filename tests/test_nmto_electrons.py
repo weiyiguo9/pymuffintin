@@ -67,6 +67,7 @@ def test_fermi_dirac_occupations_reproduce_count_and_band_energy() -> None:
         occupations.band_energy,
         np.einsum("k,kb,kb->", weights, occupations.values, energies),
     )
+    assert occupations.minus_temperature_entropy < 0.0
 
 
 def test_nmto_basis_interpolation_and_sampled_density() -> None:
