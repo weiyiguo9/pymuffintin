@@ -50,6 +50,15 @@ from .nmto import (
     nmto_hamiltonian_overlap,
     ordinary_divided_differences,
 )
+from .electrons import (
+    NmtoBands,
+    NmtoOccupations,
+    fermi_dirac_occupations,
+    interpolate_nmto_basis,
+    nmto_density_matrices,
+    sample_nmto_density,
+    solve_nmto_bands,
+)
 
 __all__ = [
     "HARMONICS_L4",
@@ -60,6 +69,8 @@ __all__ = [
     "KinkMesh",
     "LowdinResult",
     "NmtoResult",
+    "NmtoBands",
+    "NmtoOccupations",
     "OmtFit",
     "OmtFitDiagnostics",
     "RealHarmonic",
@@ -78,12 +89,15 @@ __all__ = [
     "evaluate_usw",
     "evaluate_omt",
     "fit_omt",
+    "fermi_dirac_occupations",
     "green_mesh",
     "interstitial_volume",
+    "interpolate_nmto_basis",
     "lattice_cluster",
     "lagrange_matrices",
     "lowdin_orthogonalize",
     "nmto_hamiltonian_overlap",
+    "nmto_density_matrices",
     "omt_design_matrix",
     "ordinary_divided_differences",
     "overlap_fractions",
@@ -92,6 +106,8 @@ __all__ = [
     "real_spherical_harmonics",
     "usw_matrices",
     "usw_matrices_with_energy_derivative",
+    "sample_nmto_density",
+    "solve_nmto_bands",
     "downfold_kink",
     "downfold_kink_mesh",
 ]
