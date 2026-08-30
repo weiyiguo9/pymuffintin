@@ -5,6 +5,10 @@ build-backend = "hatchling.build"
 [project]
 name = "pymuffintin"
 version = "0.1.0"
+description = "Backend-neutral algorithm laboratory for muffin-tin auxiliary-basis and Coulomb experiments"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{name = "weiyiguo9"}]
 requires-python = ">=3.10"
 dependencies = ["numpy"]
 
