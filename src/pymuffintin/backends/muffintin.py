@@ -124,11 +124,9 @@ class MuffintinAdapter:
         self,
         native: ModuleType,
         inputs: tuple[object, ...],
-        input_slice: object,
     ) -> None:
         self.__native = native
         self.__inputs = inputs
-        self.__input_slice = input_slice
         self.__mpb: dict[int, _MpbCache] = {}
         self.__mpb_coulomb: dict[tuple[int, int], NDArray[np.complex128]] = {}
 
@@ -148,8 +146,7 @@ class MuffintinAdapter:
             else physics.scalar_product_input(path, q=q)
             for q in q_points
         )
-        input_slice = physics.scalar_q_slice(path)
-        return cls(native, inputs, input_slice)
+        return cls(native, inputs)
 
     @property
     def n_q(self) -> int:

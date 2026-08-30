@@ -45,22 +45,26 @@ def fixed_orbital_exchange(
         if block.matrix.shape != (representation.n_auxiliary, representation.n_auxiliary):
             raise ValueError("Coulomb matrix dimension must match the auxiliary representation")
 
+        # vertices[k, i, j] pairs band i at k-q (conjugated) with band j at k
+        # (the MuffintinAdapter.sample convention, doc 21 section 4.2). The
+        # occupied/internal band summed against the Coulomb block is i (at
+        # k-q); the external sigma indices are j, j' (at k).
         vertices = representation.coefficients.reshape(
             layout.n_k, layout.n_orb, layout.n_orb, representation.n_auxiliary
         )
         q_weight = occupation.q_weights[q_index]
         for k_index in range(layout.n_k):
             occupied_k = occupation.k_minus_q_indices[q_index, k_index]
-            for left in range(layout.n_orb):
-                for left_prime in range(layout.n_orb):
+            for j in range(layout.n_orb):
+                for j_prime in range(layout.n_orb):
                     value = 0.0j
-                    for right in range(layout.n_orb):
-                        pair = vertices[k_index, left, right]
-                        pair_prime = vertices[k_index, left_prime, right]
-                        value += occupation.values[occupied_k, right] * (
+                    for i in range(layout.n_orb):
+                        pair = vertices[k_index, i, j]
+                        pair_prime = vertices[k_index, i, j_prime]
+                        value += occupation.values[occupied_k, i] * (
                             pair.conj() @ block.matrix @ pair_prime
                         )
-                    sigma[k_index, left, left_prime] -= q_weight * value
+                    sigma[k_index, j, j_prime] -= q_weight * value
 
     exchange_energy = 0.0
     for k_index in range(layout.n_k):

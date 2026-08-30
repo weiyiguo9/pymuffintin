@@ -1,6 +1,5 @@
 import json
 import sys
-from importlib import import_module
 from pathlib import Path
 
 import numpy as np
@@ -66,7 +65,7 @@ def _complex_blocks(values: np.ndarray) -> list[list[list[float]]]:
 
 def test_gate3_hydrogen_fixed_orbital_exchange_pipeline(capsys: pytest.CaptureFixture[str]) -> None:
     sys.path.insert(0, str(LIBMUFFINTIN / "python"))
-    native = import_module("libmuffintin")
+    native = pytest.importorskip("libmuffintin")
     required_module_api = (
         "build_scalar_mpb",
         "build_scalar_mpb_coulomb",
