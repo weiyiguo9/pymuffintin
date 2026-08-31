@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 from .usw import (
     HARMONICS_L4,
     IDENTITY_HARMONICS_L4,
@@ -62,6 +64,8 @@ from .electrons import (
     sample_nmto_density,
     solve_nmto_bands,
 )
+if TYPE_CHECKING:
+    from .scf import NmtoScfInput, NmtoScfResult, NmtoScfSettings
 
 __all__ = [
     "HARMONICS_L4",
@@ -72,6 +76,9 @@ __all__ = [
     "KinkMesh",
     "LowdinResult",
     "NmtoResult",
+    "NmtoScfInput",
+    "NmtoScfResult",
+    "NmtoScfSettings",
     "NmtoBands",
     "NmtoOccupations",
     "OmtFit",
@@ -114,6 +121,15 @@ __all__ = [
     "usw_matrices_with_energy_derivative",
     "sample_nmto_density",
     "solve_nmto_bands",
+    "run_nmto_scf",
     "downfold_kink",
     "downfold_kink_mesh",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"NmtoScfInput", "NmtoScfResult", "NmtoScfSettings", "run_nmto_scf"}:
+        from . import scf
+
+        return getattr(scf, name)
+    raise AttributeError(name)

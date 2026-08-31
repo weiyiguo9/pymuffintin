@@ -11,6 +11,7 @@ from .contracts import (
 )
 from .regional import RegionalScalarSampler
 from .providers import Coulomb, LocalProduct, Orbitals
+from .symmetry import IrreducibleKMesh, SymmetryDataset, reduce_regular_kmesh
 
 __all__ = [
     "AuxiliaryRepresentation",
@@ -19,6 +20,7 @@ __all__ = [
     "ExchangeAblation",
     "ExchangeResult",
     "FixedOccupation",
+    "IrreducibleKMesh",
     "LocalProduct",
     "OrbitalWindow",
     "Orbitals",
@@ -26,4 +28,6 @@ __all__ = [
     "PairSamples",
     "RegionalChargeExpansion",
     "RegionalScalarSampler",
+    "SymmetryDataset",
+    "reduce_regular_kmesh",
 ]

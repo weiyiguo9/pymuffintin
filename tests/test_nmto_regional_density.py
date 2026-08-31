@@ -48,13 +48,14 @@ def test_constant_density_projects_to_g0_and_muffin_tin_monopole() -> None:
         site_fractional = np.array([[0.5, 0.5, 0.5]])
         muffin_tin_radii = np.array([0.8])
         radial_samples = {(0, 0): radial}
+        symmetry = None
 
         @staticmethod
         def _nearest_sites(points):
             return np.zeros_like(points), np.full(len(points), -1, dtype=np.int64)
 
         @staticmethod
-        def density(points):
+        def _raw_density(points):
             return np.full(len(points), density_value)
 
     captured = {}

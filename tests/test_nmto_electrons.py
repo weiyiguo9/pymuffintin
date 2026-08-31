@@ -70,6 +70,37 @@ def test_fermi_dirac_occupations_reproduce_count_and_band_energy() -> None:
     assert occupations.minus_temperature_entropy < 0.0
 
 
+def test_orbit_weights_reproduce_full_mesh_occupations() -> None:
+    representatives = np.array([[-0.7, 0.2], [-0.4, 0.5], [-0.1, 0.8]])
+    multiplicities = np.array([1, 4, 3])
+    full = np.repeat(representatives, multiplicities, axis=0)
+    full_occupations = fermi_dirac_occupations(
+        full,
+        np.full(8, 1.0 / 8.0),
+        electron_count=2.0,
+        temperature=0.05,
+    )
+    reduced_occupations = fermi_dirac_occupations(
+        representatives,
+        multiplicities / 8.0,
+        electron_count=2.0,
+        temperature=0.05,
+    )
+
+    np.testing.assert_allclose(
+        reduced_occupations.chemical_potential,
+        full_occupations.chemical_potential,
+    )
+    np.testing.assert_allclose(
+        reduced_occupations.band_energy,
+        full_occupations.band_energy,
+    )
+    np.testing.assert_allclose(
+        reduced_occupations.minus_temperature_entropy,
+        full_occupations.minus_temperature_entropy,
+    )
+
+
 def test_nmto_basis_interpolation_and_sampled_density() -> None:
     node_values = np.array(
         [

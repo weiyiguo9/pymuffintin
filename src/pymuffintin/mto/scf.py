@@ -13,7 +13,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ..contracts import ComplexArray, FloatArray, IntArray
-from ..symmetry import SymmetryDataset, detect
+from ..symmetry import IrreducibleKMesh, SymmetryDataset, detect, reduce_regular_kmesh
 from ..tensor import contract
 from .density import (
     NmtoBasisEvaluator,
@@ -77,6 +77,7 @@ class NmtoScfSettings:
     minimum_cells: int = 135
     symmetry: bool = True
     symprec: float = 1.0e-5
+    include_time_reversal: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -131,6 +132,7 @@ class NmtoScfSettings:
             minimum_cells=int(nmto.get("minimum-cells", 135)),
             symmetry=bool(symmetry.get("enabled", True)),
             symprec=float(symmetry.get("symprec", 1.0e-5)),
+            include_time_reversal=bool(symmetry.get("include-time-reversal", True)),
         )
 
 
@@ -154,6 +156,7 @@ class NmtoScfInput:
     settings: NmtoScfSettings
     checkpoint: object | None = None
     symmetry_dataset: SymmetryDataset | None = field(init=False)
+    k_mesh_reduction: IrreducibleKMesh | None = field(init=False)
 
     def __post_init__(self) -> None:
         lattice = np.asarray(self.lattice, dtype=np.float64)
@@ -182,6 +185,20 @@ class NmtoScfInput:
             else None
         )
         object.__setattr__(self, "symmetry_dataset", dataset)
+        object.__setattr__(
+            self,
+            "k_mesh_reduction",
+            None
+            if dataset is None
+            else reduce_regular_kmesh(
+                dataset,
+                self.settings.k_mesh,
+                self.settings.k_shift,
+                include_time_reversal=self.settings.include_time_reversal,
+            ),
+        )
+        if self.k_mesh_reduction is not None:
+            _validate_symmetry_layout(self)
 
     @classmethod
     def from_python(
@@ -295,6 +312,51 @@ def _single_dft_scf_task(document: Mapping[str, Any]) -> Mapping[str, Any]:
     return selected[0]
 
 
+def _validate_symmetry_layout(scf_input: NmtoScfInput) -> None:
+    dataset = scf_input.symmetry_dataset
+    reduction = scf_input.k_mesh_reduction
+    assert dataset is not None and reduction is not None
+    operations = np.unique(reduction.active_operation_indices)
+    vectors = {tuple(vector) for vector in scf_input.g_vectors}
+    for operation in operations:
+        rotation = dataset.rotations[operation]
+        translation = dataset.translations[operation]
+        for vector in scf_input.g_vectors:
+            source = tuple(rotation.T @ vector)
+            if source not in vectors:
+                raise ValueError(
+                    f"g_vectors are not closed under symmetry operation {operation}: "
+                    f"missing {source}"
+                )
+        images = np.mod(
+            scf_input.fractional_positions @ rotation.T + translation,
+            1.0,
+        )
+        for source, image in enumerate(images):
+            delta = scf_input.fractional_positions - image
+            delta -= np.rint(delta)
+            distances = np.linalg.norm(delta @ scf_input.lattice, axis=1)
+            target = int(np.argmin(distances))
+            if distances[target] > scf_input.settings.symprec:
+                raise ValueError(
+                    f"symmetry operation {operation} does not map site {source}"
+                )
+            if (
+                scf_input.atomic_numbers[source] != scf_input.atomic_numbers[target]
+                or abs(
+                    scf_input.muffin_tin_radii[source]
+                    - scf_input.muffin_tin_radii[target]
+                )
+                > scf_input.settings.symprec
+                or scf_input.radial_equations[source]
+                != scf_input.radial_equations[target]
+            ):
+                raise ValueError(
+                    f"symmetry operation {operation} maps incompatible sites "
+                    f"{source} and {target}"
+                )
+
+
 def _checkpoint_geometry(document: Mapping[str, Any]) -> dict[str, Any]:
     geometry = document["geometry"]
     lattice = geometry["lattice"]["vectors"]
@@ -376,6 +438,13 @@ class NmtoScfResult:
     energy_history: FloatArray
     convergence_history: FloatArray
     valence_normalization_history: FloatArray
+    k_sampling: IrreducibleKMesh | None
+    _restart_checkpoint: object | None
+
+    def restart_checkpoint(self) -> object:
+        if self._restart_checkpoint is None:
+            raise ValueError("NMTO SCF input has no checkpoint context")
+        return self._restart_checkpoint
 
 
 @dataclass(frozen=True)
@@ -386,8 +455,11 @@ class _NmtoIteration:
     valence_normalization: float
 
 
-def run_nmto_scf(scf_input: NmtoScfInput) -> NmtoScfResult:
+def run_nmto_scf(scf_input: NmtoScfInput | str | Path) -> NmtoScfResult:
     """Run the full scalar NMTO density/potential/mixing loop in Python."""
+
+    if not isinstance(scf_input, NmtoScfInput):
+        scf_input = NmtoScfInput.from_toml(scf_input)
 
     native = scf_input.native
     settings = scf_input.settings
@@ -418,11 +490,23 @@ def run_nmto_scf(scf_input: NmtoScfInput) -> NmtoScfResult:
             and energy.energy_change is not None
             and change <= settings.energy_tolerance
         ):
+            restart_checkpoint = None
+            if scf_input.checkpoint is not None:
+                checkpoint_physics = native.CheckpointPhysics(scf_input.checkpoint)
+                restart_checkpoint = checkpoint_physics.restart_checkpoint(
+                    density,
+                    potential,
+                    _checkpoint_annotations(
+                        scf_input,
+                        iteration,
+                        float(energy.total),
+                    ),
+                )
             return NmtoScfResult(
                 iterations=iteration,
                 total_energy=float(energy.total),
                 chemical_potential=current.occupations.chemical_potential,
-                density=current.output_density,
+                density=density,
                 potential=potential,
                 bands=current.bands,
                 occupations=current.occupations,
@@ -431,6 +515,8 @@ def run_nmto_scf(scf_input: NmtoScfInput) -> NmtoScfResult:
                 valence_normalization_history=np.asarray(
                     valence_normalization_history
                 ),
+                k_sampling=scf_input.k_mesh_reduction,
+                _restart_checkpoint=restart_checkpoint,
             )
         density = mixer.step(density, current.output_density).density()
         previous_total = float(energy.total)
@@ -438,6 +524,50 @@ def run_nmto_scf(scf_input: NmtoScfInput) -> NmtoScfResult:
         f"NMTO SCF did not converge after {settings.max_iterations} iterations; "
         f"density_rms={convergence_history[-1][0]}, energy_change={convergence_history[-1][1]}"
     )
+
+
+def _checkpoint_annotations(
+    scf_input: NmtoScfInput,
+    iterations: int,
+    total_energy: float,
+) -> dict[str, str]:
+    annotations = {
+        "nmto.scf.iterations": str(iterations),
+        "nmto.scf.total_energy_hartree": repr(total_energy),
+        "scf.k_sampling.divisions": ",".join(map(str, scf_input.settings.k_mesh)),
+        "scf.k_sampling.shift": ",".join(map(str, scf_input.settings.k_shift)),
+    }
+    reduction = scf_input.k_mesh_reduction
+    if reduction is None:
+        annotations["scf.k_sampling.kind"] = "full"
+        annotations["scf.k_sampling.full_point_count"] = str(
+            int(np.prod(scf_input.settings.k_mesh))
+        )
+    else:
+        annotations.update(
+            {
+                "scf.k_sampling.kind": "symmetry-reduced",
+                "scf.k_sampling.symprec_bohr": repr(scf_input.settings.symprec),
+                "scf.k_sampling.include_time_reversal": str(
+                    scf_input.settings.include_time_reversal
+                ).lower(),
+                "scf.k_sampling.spacegroup_number": str(
+                    scf_input.symmetry_dataset.spacegroup_number
+                ),
+                "scf.k_sampling.full_point_count": str(len(reduction.full_points)),
+                "scf.k_sampling.irreducible_point_count": str(
+                    len(reduction.representative_points)
+                ),
+                "scf.k_sampling.multiplicities": ",".join(
+                    map(str, reduction.multiplicities)
+                ),
+                "scf.k_sampling.operation_count": str(
+                    len(np.unique(reduction.active_operation_indices))
+                ),
+                "scf.k_sampling.symmetry_provenance": scf_input.symmetry_dataset.provenance,
+            }
+        )
+    return annotations
 
 
 def _solve_nmto_iteration(
@@ -448,7 +578,11 @@ def _solve_nmto_iteration(
     settings = scf_input.settings
     direct = scf_input.lattice
     reciprocal = 2.0 * np.pi * np.linalg.inv(direct).T
-    k_fractional, k_weights = _regular_k_mesh(settings.k_mesh, settings.k_shift)
+    if scf_input.k_mesh_reduction is None:
+        k_fractional, k_weights = _regular_k_mesh(settings.k_mesh, settings.k_shift)
+    else:
+        k_fractional = scf_input.k_mesh_reduction.representative_points
+        k_weights = scf_input.k_mesh_reduction.weights
     k_cartesian = k_fractional @ reciprocal
     integers, translations = _translation_cluster(direct, settings.minimum_cells)
     center_translation = int(np.flatnonzero(np.all(integers == 0, axis=1))[0])
@@ -561,6 +695,11 @@ def _solve_nmto_iteration(
         folded_coefficients=np.asarray(folded_coefficients),
         radial_samples=radial_samples,
         symmetry=scf_input.symmetry_dataset,
+        symmetry_operation_indices=(
+            None
+            if scf_input.k_mesh_reduction is None
+            else scf_input.k_mesh_reduction.active_operation_indices
+        ),
     )
     evaluator = replace(
         evaluator,

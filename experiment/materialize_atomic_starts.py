@@ -107,6 +107,12 @@ def _parser() -> argparse.ArgumentParser:
             "local_experiment/generated/python_atomic_starts/<material>"
         ),
     )
+    parser.add_argument("--field-g-cutoff", type=float, default=FIELD_G_CUTOFF)
+    parser.add_argument(
+        "--field-muffin-tin-l-max",
+        type=int,
+        default=FIELD_MUFFIN_TIN_L_MAX,
+    )
     return parser
 
 
@@ -129,8 +135,8 @@ def main() -> None:
 
     layout = mt.RegionalFieldLayout.from_g_cutoff(
         structure,
-        g_cutoff=FIELD_G_CUTOFF,
-        muffin_tin_l_max=FIELD_MUFFIN_TIN_L_MAX,
+        g_cutoff=args.field_g_cutoff,
+        muffin_tin_l_max=args.field_muffin_tin_l_max,
     )
     start = mt.materialize_atomic_start(
         structure,

@@ -42,6 +42,9 @@ def test_python_input_detects_diamond_symmetry_by_default() -> None:
 
     assert prepared.symmetry_dataset is not None
     assert prepared.symmetry_dataset.spacegroup_number == 227
+    assert prepared.k_mesh_reduction is not None
+    np.testing.assert_array_equal(prepared.k_mesh_reduction.multiplicities, [1, 4, 3])
+    np.testing.assert_allclose(prepared.k_mesh_reduction.weights, [0.125, 0.5, 0.375])
 
 
 def test_python_input_can_disable_symmetry() -> None:
@@ -63,6 +66,7 @@ def test_python_input_can_disable_symmetry() -> None:
     )
 
     assert prepared.symmetry_dataset is None
+    assert prepared.k_mesh_reduction is None
 
 
 def test_toml_input_reaches_the_same_prepared_type(tmp_path) -> None:

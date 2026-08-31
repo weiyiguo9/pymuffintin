@@ -64,6 +64,7 @@ class NmtoBasisEvaluator:
     folded_coefficients: ComplexArray
     radial_samples: Mapping[tuple[int, int], ScalarRadialSamples]
     symmetry: SymmetryDataset | None
+    symmetry_operation_indices: NDArray[np.int64] | None = None
     basis_corrections: ComplexArray | None = None
 
     def __post_init__(self) -> None:
@@ -95,15 +96,23 @@ class NmtoBasisEvaluator:
         inverse_direct = np.linalg.inv(self.direct_lattice)
         fractional = np.mod(sample_points @ inverse_direct, 1.0)
         result = np.zeros(len(sample_points), dtype=np.float64)
-        for rotation, translation in zip(
-            self.symmetry.rotations, self.symmetry.translations, strict=True
-        ):
+        operations = self._symmetry_operations()
+        for operation in operations:
+            rotation = self.symmetry.rotations[operation]
+            translation = self.symmetry.translations[operation]
             inverse = np.linalg.inv(rotation)
             transformed = (
                 np.mod((fractional - translation) @ inverse.T, 1.0) @ self.direct_lattice
             )
             result += self._raw_density(transformed)
-        return result / len(self.symmetry.rotations)
+        return result / len(operations)
+
+    def _symmetry_operations(self) -> NDArray[np.int64]:
+        if self.symmetry is None:
+            return np.empty(0, dtype=np.int64)
+        if self.symmetry_operation_indices is None:
+            return np.arange(len(self.symmetry.rotations), dtype=np.int64)
+        return np.unique(self.symmetry_operation_indices)
 
     def _raw_density(self, points: FloatArray) -> FloatArray:
         density_matrices = nmto_density_matrices(self.bands, self.occupations)
@@ -261,7 +270,10 @@ def _fit_interstitial_density(
     coefficients[zero] = coefficients[zero].real
     if evaluator.symmetry is not None:
         coefficients = _symmetrize_fourier(
-            vectors, coefficients, evaluator.symmetry
+            vectors,
+            coefficients,
+            evaluator.symmetry,
+            evaluator._symmetry_operations(),
         )
     return coefficients
 
@@ -326,18 +338,19 @@ def _symmetrize_fourier(
     vectors: NDArray[np.int64],
     coefficients: ComplexArray,
     symmetry: SymmetryDataset,
+    operation_indices: NDArray[np.int64],
 ) -> ComplexArray:
     by_vector = {tuple(vector): index for index, vector in enumerate(vectors)}
     result = np.zeros_like(coefficients)
-    for rotation, translation in zip(
-        symmetry.rotations, symmetry.translations, strict=True
-    ):
+    for operation in operation_indices:
+        rotation = symmetry.rotations[operation]
+        translation = symmetry.translations[operation]
         for target, vector in enumerate(vectors):
             source_vector = tuple(rotation.T @ vector)
             source = by_vector[source_vector]
             phase = np.exp(-2j * np.pi * (vector @ translation))
             result[target] += phase * coefficients[source]
-    result /= len(symmetry.rotations)
+    result /= len(operation_indices)
     for vector, index in by_vector.items():
         opposite = by_vector[tuple(-np.asarray(vector))]
         average = 0.5 * (result[index] + result[opposite].conj())
@@ -359,9 +372,9 @@ def _symmetrize_muffin_tins(
     operation_maps = []
     cartesian_rotations = []
     inverse_direct = np.linalg.inv(evaluator.direct_lattice)
-    for rotation, translation in zip(
-        evaluator.symmetry.rotations, evaluator.symmetry.translations, strict=True
-    ):
+    for operation in evaluator._symmetry_operations():
+        rotation = evaluator.symmetry.rotations[operation]
+        translation = evaluator.symmetry.translations[operation]
         images = np.mod(
             evaluator.site_fractional @ rotation.T + translation, 1.0
         )

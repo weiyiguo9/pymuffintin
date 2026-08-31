@@ -17,6 +17,18 @@ field layout is explicit: it uses `g_cutoff = 4.0 bohr^-1` and muffin-tin
 the density/potential layout for the atomic start; the authored V3 LAPW inputs
 retain their separate orbital-envelope `g-cutoff = 2.0 bohr^-1`.
 
+For the diamond accuracy setting with LAPW orbital `g-cutoff = 4.0 bohr^-1`,
+use the requested three-times potential/density plane-wave cutoff and
+`l_max = 6` density layout explicitly:
+
+```sh
+python experiment/materialize_atomic_starts.py diamond-c \
+  --field-g-cutoff 12.0 --field-muffin-tin-l-max 6
+```
+
+The two cutoffs are independent: `4.0 bohr^-1` belongs to the LAPW/APW orbital
+envelope, while `12.0 bohr^-1` belongs to the regional potential and density.
+
 The default output is a new directory under
 `../local_experiment/generated/python_atomic_starts/`; the producer refuses to replace an existing
 checkpoint.  An explicit new directory may be supplied instead:
@@ -155,6 +167,17 @@ The output directory is required to be new.  It contains the converged restart
 checkpoint, a matching restart input, DMK source/result archives, and
 `diamond_scf_comparison.npz` with SCF history, raw and aligned Hartree bands,
 density-projection provenance, and both periodic DMK potentials.
+
+### Independent NMTO SCF entry point
+
+`pymuffintin.mto.run_nmto_scf(path_or_input)` runs the Python-owned NMTO SCF
+loop directly from a TOML path or a prepared `NmtoScfInput`.  It consumes the
+method-neutral checkpoint structure, radial samples, regional density and
+potential kernels; it does not call the LAPW orbital solver and does not need a
+LAPW-converged potential.  With symmetry enabled it solves only the regular
+k-mesh representatives, uses orbit weights, projects the post-core regional
+density with the same active subgroup, and exposes a method-neutral restart
+checkpoint on the result.
 
 ## Current numerical results
 
