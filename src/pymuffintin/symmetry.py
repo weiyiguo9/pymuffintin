@@ -1,11 +1,11 @@
 """Unified crystal-symmetry dataset over spglib detection and spgrep irreps.
 
-This mirrors the Rust ``muffintin_symmetry`` IR so both language layers share
-one contract: rotations are integer matrices in the input-cell fractional
-basis acting as ``rotations[i] @ x + translations[i]``, translations are
-fractional, and ``equivalent_atoms[i]`` is the representative site of site
-``i``'s crystallographic orbit. Backends (spglib here, moyo in the Rust core,
-SPEX import) populate the same dataset, so analysis code never depends on a
+``SymmetryDataset`` mirrors the Rust ``muffintin_symmetry`` IR: rotations are
+integer matrices in the input-cell fractional basis acting as
+``rotations[i] @ x + translations[i]``, translations are fractional, and
+``equivalent_atoms[i]`` is the representative site of site ``i``'s
+crystallographic orbit. Backends (spglib here, moyo in the Rust core, SPEX
+import) populate the same dataset, so analysis code never depends on a
 backend-native structure.
 
 The irrep helpers wrap spgrep and consume the dataset directly; they assume
@@ -44,26 +44,29 @@ class SymmetryDataset:
 class IrreducibleKMesh:
     """Regular reciprocal mesh partitioned into symmetry orbits.
 
-    ``parent_indices[i]`` is the full-mesh index of point ``i``'s orbit
-    representative, while ``orbit_indices[i]`` is its index in
-    ``representative_points``.  The operation recorded for point ``i`` maps
-    its representative onto that point; ``operation_time_reversals`` records
-    whether the reciprocal action includes the antiunitary sign reversal.
+    The storage is array-oriented, but ``representative_index`` and ``parent``
+    follow Rust ``FullKPoint`` semantics: the former is the representative's
+    full-mesh linear index for each point, while the latter indexes
+    ``irreducible_points`` and can expand irreducible values over the full BZ.
     """
 
     divisions: tuple[int, int, int]
     shift: tuple[float, float, float]
     full_points: FloatArray
-    representative_indices: IntArray
-    representative_points: FloatArray
-    parent_indices: IntArray
-    orbit_indices: IntArray
-    operation_indices: IntArray
-    operation_time_reversals: NDArray[np.bool_]
+    representative_index: IntArray
+    parent: IntArray
     active_operation_indices: IntArray
-    active_operation_time_reversals: NDArray[np.bool_]
     multiplicities: IntArray
-    weights: FloatArray
+
+    @property
+    def irreducible_points(self) -> FloatArray:
+        """Orbit representatives in irreducible-point order."""
+        return self.full_points[np.unique(self.representative_index)]
+
+    @property
+    def weights(self) -> FloatArray:
+        """Normalized irreducible weights."""
+        return self.multiplicities.astype(np.float64) / len(self.full_points)
 
 
 def detect(
@@ -118,7 +121,7 @@ def reduce_regular_kmesh(
     When ``include_time_reversal`` is true, the dataset operations are enlarged
     by composition with pure time reversal.
     """
-    mesh = _mesh_divisions(divisions)
+    mesh = _validated_divisions(divisions)
     half_shift = _half_shift(shift)
     normalized_shift = tuple(component / 2.0 for component in half_shift)
     integer_points = np.asarray(
@@ -136,14 +139,6 @@ def reduce_regular_kmesh(
         if include_time_reversal:
             actions.append((operation, not antiunitary, inverse))
 
-    identity = np.eye(3, dtype=np.int64)
-    actions.sort(
-        key=lambda action: (
-            not (np.array_equal(dataset.rotations[action[0]], identity) and not action[1]),
-            action[1],
-            action[0],
-        )
-    )
     permutations: list[tuple[int, bool, IntArray]] = []
     scale = lcm(*mesh)
     scaled = doubled * (scale // mesh_array)
@@ -168,56 +163,39 @@ def reduce_regular_kmesh(
         raise ValueError("no symmetry operation preserves the regular k mesh")
 
     images = np.stack([permutation for _, _, permutation in permutations])
-    parent_indices = images.min(axis=0).astype(np.int64)
-    representative_indices = np.unique(parent_indices).astype(np.int64)
+    representative_index = images.min(axis=0).astype(np.int64)
+    irreducible_indices = np.unique(representative_index).astype(np.int64)
     representative_lookup = {
         int(representative): orbit
-        for orbit, representative in enumerate(representative_indices)
+        for orbit, representative in enumerate(irreducible_indices)
     }
-    orbit_indices = np.asarray(
-        [representative_lookup[int(parent)] for parent in parent_indices],
+    parent = np.asarray(
+        [representative_lookup[int(representative)] for representative in representative_index],
         dtype=np.int64,
     )
 
-    operation_indices = np.empty(len(full_points), dtype=np.int64)
-    operation_time_reversals = np.empty(len(full_points), dtype=np.bool_)
-    for point, representative in enumerate(parent_indices):
-        for operation, antiunitary, permutation in permutations:
-            if permutation[representative] == point:
-                operation_indices[point] = operation
-                operation_time_reversals[point] = antiunitary
-                break
-        else:
-            raise ValueError("symmetry operations do not form closed k-point orbits")
-
     multiplicities = np.bincount(
-        orbit_indices, minlength=len(representative_indices)
+        parent, minlength=len(irreducible_indices)
     ).astype(np.int64)
     return IrreducibleKMesh(
         divisions=mesh,
         shift=normalized_shift,
         full_points=full_points,
-        representative_indices=representative_indices,
-        representative_points=full_points[representative_indices].copy(),
-        parent_indices=parent_indices,
-        orbit_indices=orbit_indices,
-        operation_indices=operation_indices,
-        operation_time_reversals=operation_time_reversals,
-        active_operation_indices=np.asarray(
-            [operation for operation, _, _ in permutations], dtype=np.int64
-        ),
-        active_operation_time_reversals=np.asarray(
-            [antiunitary for _, antiunitary, _ in permutations], dtype=np.bool_
+        representative_index=representative_index,
+        parent=parent,
+        active_operation_indices=np.unique(
+            np.asarray([operation for operation, _, _ in permutations], dtype=np.int64)
         ),
         multiplicities=multiplicities,
-        weights=multiplicities.astype(np.float64) / len(full_points),
     )
 
 
-def _mesh_divisions(divisions: tuple[int, int, int]) -> tuple[int, int, int]:
-    if len(divisions) != 3 or any(type(size) is not int or size <= 0 for size in divisions):
+def _validated_divisions(divisions: tuple[int, int, int]) -> tuple[int, int, int]:
+    if len(divisions) != 3 or any(
+        not isinstance(size, (int, np.integer)) or size <= 0 for size in divisions
+    ):
         raise ValueError("divisions must contain three positive ints")
-    return divisions
+    return tuple(int(size) for size in divisions)
 
 
 def _half_shift(shift: tuple[float, float, float]) -> tuple[int, int, int]:

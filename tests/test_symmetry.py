@@ -55,26 +55,20 @@ def test_diamond_3x3x3_ibz_has_four_exact_orbits() -> None:
         np.array([[0.0, 0.0, 0.0], [0.25, 0.25, 0.25]]),
         np.array([6, 6]),
     )
-    reduced = reduce_regular_kmesh(dataset, (3, 3, 3))
+    reduced = reduce_regular_kmesh(
+        dataset, tuple(np.array([3, 3, 3], dtype=np.int64))
+    )
 
     assert reduced.divisions == (3, 3, 3)
     assert reduced.shift == (0.0, 0.0, 0.0)
     assert reduced.full_points.shape == (27, 3)
-    assert reduced.representative_points.shape == (4, 3)
+    assert reduced.irreducible_points.shape == (4, 3)
     np.testing.assert_array_equal(reduced.multiplicities, [1, 8, 6, 12])
     np.testing.assert_allclose(reduced.weights, np.array([1, 8, 6, 12]) / 27)
     np.testing.assert_array_equal(
-        reduced.parent_indices,
-        reduced.representative_indices[reduced.orbit_indices],
+        reduced.representative_index,
+        np.unique(reduced.representative_index)[reduced.parent],
     )
-
-    for point, representative in enumerate(reduced.parent_indices):
-        rotation = dataset.rotations[reduced.operation_indices[point]]
-        image = reduced.full_points[representative] @ np.linalg.inv(rotation)
-        if reduced.operation_time_reversals[point]:
-            image = -image
-        residue = image - reduced.full_points[point]
-        np.testing.assert_allclose(residue - np.rint(residue), 0.0, atol=1.0e-12)
 
 
 def test_half_shifted_mesh_is_normalized_and_reduced() -> None:
@@ -105,9 +99,7 @@ def test_optional_time_reversal_joins_opposite_k_points() -> None:
 
     np.testing.assert_array_equal(unitary.multiplicities, [1, 1, 1])
     np.testing.assert_array_equal(with_time_reversal.multiplicities, [1, 2])
-    assert with_time_reversal.parent_indices[2] == 1
-    assert with_time_reversal.operation_indices[2] == 0
-    assert with_time_reversal.operation_time_reversals[2]
+    assert with_time_reversal.parent[2] == 1
 
 
 def test_dataset_antiunitary_operation_is_kept_without_extra_time_reversal() -> None:
@@ -127,7 +119,7 @@ def test_dataset_antiunitary_operation_is_kept_without_extra_time_reversal() -> 
     )
 
     np.testing.assert_array_equal(reduced.multiplicities, [1, 2])
-    assert np.any(reduced.active_operation_time_reversals)
+    np.testing.assert_array_equal(reduced.active_operation_indices, [0, 1])
 
 
 def test_incompatible_shifted_operation_is_excluded_exactly() -> None:
@@ -152,4 +144,4 @@ def test_incompatible_shifted_operation_is_excluded_exactly() -> None:
     )
 
     np.testing.assert_array_equal(reduced.multiplicities, [1, 1, 1, 1])
-    np.testing.assert_array_equal(reduced.operation_indices, np.zeros(4, dtype=np.int64))
+    np.testing.assert_array_equal(reduced.active_operation_indices, [0])

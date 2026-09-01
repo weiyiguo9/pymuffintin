@@ -260,8 +260,6 @@ def _parse_atom_basis(lines: list[str]) -> tuple[IntArray, FloatArray]:
             numbers.append(int(match.group(1)))
             positions.append([float(match.group(g)) for g in (2, 3, 4)])
             continue
-        if positions and "in absolute" in line:
-            break
         if positions:
             break
     if not positions:

@@ -556,7 +556,7 @@ def _checkpoint_annotations(
                 ),
                 "scf.k_sampling.full_point_count": str(len(reduction.full_points)),
                 "scf.k_sampling.irreducible_point_count": str(
-                    len(reduction.representative_points)
+                    len(reduction.irreducible_points)
                 ),
                 "scf.k_sampling.multiplicities": ",".join(
                     map(str, reduction.multiplicities)
@@ -581,7 +581,7 @@ def _solve_nmto_iteration(
     if scf_input.k_mesh_reduction is None:
         k_fractional, k_weights = _regular_k_mesh(settings.k_mesh, settings.k_shift)
     else:
-        k_fractional = scf_input.k_mesh_reduction.representative_points
+        k_fractional = scf_input.k_mesh_reduction.irreducible_points
         k_weights = scf_input.k_mesh_reduction.weights
     k_cartesian = k_fractional @ reciprocal
     integers, translations = _translation_cluster(direct, settings.minimum_cells)
