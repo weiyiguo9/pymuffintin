@@ -1,28 +1,35 @@
 # pymuffintin
 
-`pymuffintin` is a backend-neutral research package for muffin-tin
-auxiliary-basis and Coulomb algorithm experiments: muffin-tin local-RI
-metrics and cutoffs, interstitial ISDF/THC point selection, muffin-tin and
-interstitial stitching, and fixed-orbital exchange ablations. It holds no
-production physics of its own; it is a laboratory over exported orbital,
-product, and Coulomb data.
+`pymuffintin` is the application layer and Python interface for
+[`libmuffintin`](https://github.com/weiyiguo9/libmuffintin). It builds
+Python-level electronic-structure workflows and algorithms on top of the
+native library, including SCF orchestration, MTO/NMTO methods, auxiliary-basis
+construction, Coulomb algorithms, and exchange calculations.
+
+The intended architectural analogy is to a libcint-style separation between
+a reusable computational library and its applications: `libmuffintin` is
+the underlying library, while `pymuffintin` provides the Python-facing
+application layer.
 
 ## Boundary
 
-The package is organized around provider protocols (`Orbitals`,
+The native computational kernels and bindings belong to `libmuffintin`;
+Python application logic, workflow orchestration, and algorithm experiments
+belong to `pymuffintin`. The dependency direction is strictly `pymuffintin`
+to `libmuffintin`, never the reverse.
+
+The auxiliary-basis and exchange paths use provider protocols (`Orbitals`,
 `LocalProduct`, `Coulomb` in `pymuffintin.providers`) and backend-neutral
 array DTOs (`pymuffintin.contracts`). Algorithm code in `auxiliary/` and
 `mbpt/` depends only on those contracts, never on a specific backend.
 
-[`libmuffintin`](https://github.com/weiyiguo9/libmuffintin) is the default
-backend: it holds the stable reference kernels (SPEX mixed-product auxiliary
+`libmuffintin` supplies the native kernels (SPEX mixed-product auxiliary
 basis, k-point ISDF/THC, the Weinert/SPEX Coulomb operator) behind the
-provider protocols. It is imported lazily, only inside
-`pymuffintin.backends.muffintin`, so `pymuffintin` itself still imports on a
-machine without the native extension built, and a foreign-dump adapter
-(SPEX, FLEUR, CoQui, ...) can implement the same protocols as a first-class
-alternative. The dependency direction is strictly `pymuffintin` to
-`libmuffintin`, never the reverse.
+provider protocols. `pymuffintin` itself can still be imported without the
+native extension built; workflows that use native kernels require it.
+Foreign-dump adapters can implement the same protocols for comparison and
+experiments, but these backend-neutral contracts do not change the package's
+role as the application layer for `libmuffintin`.
 
 The `MuffintinAdapter` in `backends/muffintin.py` consumes the
 `libmuffintin.pyexport` schema (version 1), not Rust types directly, so it
@@ -38,7 +45,7 @@ $k\,N_{\mathrm{orb}}^2 + i\,N_{\mathrm{orb}} + j$ used throughout.
 |---|---|
 | `contracts` | Backend-neutral array DTOs: orbital windows, pair samples, auxiliary representations, Coulomb blocks, fixed occupations. |
 | `providers` | `Orbitals` / `LocalProduct` / `Coulomb` protocols that any backend implements. |
-| `backends.muffintin` | The only module importing `libmuffintin`; adapts its pyexport v1 arrays to the contracts above. |
+| `backends.muffintin` | Adapts `libmuffintin` pyexport v1 arrays to the contracts above. |
 | `auxiliary.lri` | Muffin-tin local-RI auxiliary fitting via a per-site overlap eigendecomposition. |
 | `auxiliary.thc` | Weighted deterministic QRCP interpolative separable density fitting (ISDF) for the interstitial region. |
 | `auxiliary.hybrid` | Concatenates a muffin-tin local-RI block with an interstitial THC block into one hybrid auxiliary representation, including the muffin-tin/interstitial cross block. |
