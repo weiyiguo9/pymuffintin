@@ -34,13 +34,15 @@ def test_single_cell_bloch_usw_matches_cluster_evaluation_at_gamma() -> None:
     np.testing.assert_allclose(actual, expected)
 
 
-def test_constant_density_projects_to_g0_and_muffin_tin_monopole() -> None:
+def test_constant_density_projects_to_periodic_g0_and_muffin_tin_monopole() -> None:
     density_value = 0.25
     radial = ScalarRadialSamples(
         mesh_radii=np.array([0.2, 0.8]),
         large=np.ones((2, 2)),
         small=np.zeros((2, 2)),
         boundary_values=np.ones(2),
+        inverse_mass=np.full((2, 2), 0.5),
+        inverse_speed_of_light=0.0,
     )
 
     class Evaluator:
@@ -52,7 +54,7 @@ def test_constant_density_projects_to_g0_and_muffin_tin_monopole() -> None:
 
         @staticmethod
         def _nearest_sites(points):
-            return np.zeros_like(points), np.full(len(points), -1, dtype=np.int64)
+            return np.zeros_like(points), np.zeros(len(points), dtype=np.int64)
 
         @staticmethod
         def _raw_density(points):

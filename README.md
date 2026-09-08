@@ -125,6 +125,32 @@ downfolding, and strict Löwdin-orthogonalized Hamiltonians. All required
 square systems use `tensor.solve`/`tensor.inv`; the V&D and NMTO constructions
 never replace invertibility with a pseudoinverse.
 
+The independent `run_nmto_scf` path uses periodic spherical-boundary Green
+operators, not inverse-first finite-cluster Bloch folding. A negative-reference
+lattice sum and a reciprocal resolvent correction define the same periodic
+envelope for matrices and density at either sign of the interstitial energy.
+Install `pymuffintin[nmto]` for FINUFFT evaluation. The explicit numerical
+controls replace `minimum-cells` in `[task.scf.nmto]`:
+
+```toml
+energy-mesh = [-0.1, 0.2]
+reciprocal-cutoff = 12.6
+lattice-sum-radius = 16.0
+reference-energy = -1.0
+matrix-angular-order = 8
+```
+
+These are example settings, not converged diamond parameters. The reference
+energy is a numerical splitting parameter, not a shift of the physical energy
+mesh. Periodic orbitals retain inactive angular continuation inside spheres,
+scalar-relativistic mass-weighted flux, and radial/tangential small-component
+norms. There is no sampled-overlap remapping or nonpositive-mode clipping.
+The Hamiltonian receives the nonconstant interstitial and nonspherical MT
+potential matrix before solving bands and occupations, including the spherical
+potential acting on inactive free partial waves. `matrix-angular-order`
+controls sphere quadrature. Select `[task.scf.mixing] kind = "linear"` or
+`"pulay"`; Pulay also requires `history`. Both retain the specified `beta`.
+
 The energy convention is Hartree throughout, with the wave equation written as
 `(-nabla^2/2 - E) psi = 0`. The finite-cluster constant-density regression uses
 all 25 real harmonics through `l_max=4` and reproduces the published Table I
@@ -143,7 +169,7 @@ accuracy claims.
 
 ### MPI NMTO-SCF
 
-Install the optional MPI dependency with `pip install -e ".[mpi]"` and pass
+Install the optional dependencies with `pip install -e ".[nmto,mpi]"` and pass
 the caller's communicator explicitly:
 
 ```python
@@ -158,30 +184,46 @@ if MPI.COMM_WORLD.rank == 0:
 Run the script with, for example,
 `mpiexec -n 4 python -m mpi4py run_nmto.py`. All ranks must call the solver
 with the same input. Without `comm`, the ordinary serial route is used.
+In MPI mode, only communicator rank 0 returns `NmtoScfResult`; other ranks
+return `None`. Consume results and create restart checkpoints on rank 0.
 The application owns MPI initialization/finalization and output; the solver
 does not initialize a second native MPI scheduler or write checkpoints.
 
-Energy-node USW construction and k-point NMTO solves are rank-distributed.
-Basis-overlap and density sampling use point blocks, so sampling can use
-more ranks than there are irreducible k points. Large USW and folded-basis
-buffers use MPI-3 shared windows (one copy per shared-memory domain), with
+Periodic USW construction and k-point NMTO solves are rank-distributed.
+Full-potential integration and density sampling use independent work blocks.
+Numerical buffers use MPI-3 shared windows (one copy per shared-memory domain), with
 inter-node transfers performed by node leaders. Shared windows live for one
 iteration; returned results do not borrow their storage.
 
 Occupations use the complete weighted spectrum and a common chemical
-potential. Density projection retains the serial least-squares algorithm,
-and normalization follows the assembled global density. Native potential,
-core, energy, and mixing operations remain rank-local and replicated in
-this first implementation; this is not a distributed native field solver.
+potential. Interstitial density coefficients use the serial uniform-grid FFT,
+and normalization follows the assembled global density. Scalar XC uses fixed
+muffin-tin radial-shell and interstitial point blocks, independent of rank
+count. Workers borrow node-shared numerical inputs and write disjoint output
+blocks; rank 0 integrates the assembled arrays in their original order. Small
+interstitial FFTs and Hartree construction remain local to rank 0. Core-state
+searches and fixed-energy radial solves are separate rank-distributed tasks.
+Only rank 0 assembles complete native potential/core objects, evaluates energy,
+mixes density, and constructs the restart result. Workers do not reconstruct
+complete native density or potential objects from the shared inputs.
 Small spectra and result matrices are also replicated. Rank-local tensor
 contractions continue through `tensor.contract` on NumPy blocks, not through
 collective CTF calls inside independently scheduled tasks.
 
-Budget native threads together with MPI ranks; a one-thread-per-rank starting
-point sets `OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`,
+Use one native thread per MPI rank: set `OMP_NUM_THREADS=1`,
+`OPENBLAS_NUM_THREADS=1`, `TBLIS_NUM_THREADS=1`,
 `VECLIB_MAXIMUM_THREADS=1`, and `RAYON_NUM_THREADS=1` before launch. This
 execution model does not require a no-GIL Python build. MPI consistency
 checks are not diamond material-accuracy or scaling acceptance.
+
+For opt-in phase measurements, pass
+`timing_callback=lambda iteration, phase, seconds: print(iteration, phase, seconds)`
+to `run_nmto_scf`. Only rank 0 invokes it; ordinary runs do not print timings.
+Subphase timings are nested (for example, FFT planning is part of potential
+preparation, and radial solving is part of NMTO); do not sum all callbacks.
+The native Python extension enables `fft-fftw` by default and requires system
+FFTW libraries. On Homebrew macOS, set
+`LIBRARY_PATH="$(brew --prefix fftw)/lib"` when building the extension.
 
 The focused collective checks can be run with
 `mpiexec -n 4 python -m mpi4py -m pytest tests/test_nmto_mpi.py tests/test_tensor_ctf.py -q`.

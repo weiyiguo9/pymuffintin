@@ -85,6 +85,8 @@ def test_frozen_hydrogen_n2_s_nmto_agrees_with_gamma_lapw_within_2_millihartree(
     boundary = radial["boundary_radial"]
     boundary_energy = radial["energy_derivative_boundary_radial"]
     jets = BoundaryJets(
+        inverse_masses=np.full((len(energies), 1), 0.5),
+        energy_inverse_masses=np.zeros((len(energies), 1)),
         potential_radii=np.ones(1),
         values=boundary[:, 0, None],
         radial_derivatives=boundary[:, 1, None],

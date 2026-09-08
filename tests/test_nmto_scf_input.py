@@ -18,8 +18,21 @@ def _settings(*, symmetry: bool = True) -> NmtoScfSettings:
         electron_count=12.0,
         energy_mesh=(-0.1, 0.4),
         k_mesh=(2, 2, 2),
+        reciprocal_cutoff=12.6,
+        lattice_sum_radius=16.0,
+        reference_energy=-1.0,
+        mixing_kind="linear",
+        mixing_history=None,
+        matrix_angular_order=8,
         symmetry=symmetry,
     )
+
+
+def test_settings_accept_zeroth_order_nmto_mesh() -> None:
+    from dataclasses import replace
+
+    settings = replace(_settings(), energy_mesh=(-0.1,))
+    assert settings.energy_mesh == (-0.1,)
 
 
 def test_python_input_detects_diamond_symmetry_by_default() -> None:
@@ -154,6 +167,7 @@ temperature = 0.02
 kind = "lda-pw92"
 
 [task.scf.mixing]
+kind = "linear"
 beta = 0.3
 
 [task.scf.convergence]
@@ -163,6 +177,10 @@ max-iterations = 40
 
 [task.scf.nmto]
 energy-mesh = [-0.1, 0.4]
+reciprocal-cutoff = 12.6
+lattice-sum-radius = 16.0
+reference-energy = -1.0
+matrix-angular-order = 8
 """.strip()
         + "\n"
     )

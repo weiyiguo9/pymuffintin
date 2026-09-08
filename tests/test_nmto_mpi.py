@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from pymuffintin.mto.parallel import NmtoParallel
-from pymuffintin.mto.scf import _solve_nmto_iteration
+from pymuffintin.mto.scf import _current_radials, _solve_nmto_iteration
 
 
 LIBMUFFINTIN = Path(__file__).resolve().parents[2] / "libmuffintin"
@@ -33,14 +33,23 @@ def _hydrogen_iteration_input():
     # This fixture supplies a frozen potential, not an SCF restart density.
     # Use its real native radial solver and the native regional-density type.
     frozen = physics.export_frozen_potential()
+
+    def frozen_scalar_radials(site, equation, l, energies):
+        exported = physics.sample_frozen_scalar_radials("H-1", l, energies)
+        inverse_c = 1.0 / 137.0359895
+        spherical = frozen["mt_components"][0].real / np.sqrt(4.0 * np.pi)
+        inverse_mass = 1.0 / (2.0 + (np.asarray(energies)[:, None] - spherical) * inverse_c**2)
+        exported.update(
+            inverse_mass=inverse_mass,
+            inverse_speed_of_light=inverse_c,
+            boundary_inverse_mass=inverse_mass[:, -1],
+            boundary_energy_inverse_mass=-inverse_c**2 * inverse_mass[:, -1]**2,
+        )
+        return exported
+
     potential = SimpleNamespace(
-        sample_scalar_radials=lambda site, equation, l, energies: (
-            physics.sample_frozen_scalar_radials("H-1", l, energies)
-        ),
-        export_interstitial=lambda: {
-            "g_vectors": g_vectors,
-            "components": np.zeros((4, 1), dtype=np.complex128),
-        },
+        sample_scalar_radials=frozen_scalar_radials,
+        export_interstitial=lambda: frozen,
     )
     zero_density = native.RegionalDensity(
         structure,
@@ -62,11 +71,14 @@ def _hydrogen_iteration_input():
         projected["muffin_tin"] = args[6].copy()
         return native.RegionalDensity(*args)
     settings = SimpleNamespace(
-        energy_mesh=(-0.18, -0.14, -0.10),
+        energy_mesh=(-0.18, -0.10),
         k_mesh=(2, 1, 1),
         k_shift=(0.0, 0.0, 0.0),
         l_max=0,
-        minimum_cells=27,
+        reciprocal_cutoff=2.0,
+        lattice_sum_radius=8.1,
+        reference_energy=-1.0,
+        matrix_angular_order=2,
         electron_count=1.0,
         temperature=0.02,
         state_degeneracy=2.0,
@@ -139,21 +151,51 @@ def test_nmto_parallel_sharing_ownership_failures_and_lifetime() -> None:
     np.testing.assert_allclose(rows_copy, expected_rows, rtol=0.0, atol=0.0)
 
 
-def test_nmto_hydrogen_iteration_serial_matches_mpi_density_and_bands() -> None:
+def test_nmto_fixed_blocks_share_readonly_source() -> None:
+    comm = _mpi().COMM_WORLD
+    expected = np.arange(18, dtype=np.float64).reshape(9, 2)
+    blocks = [(0, 4), (4, 8), (8, 9)]
+    with NmtoParallel(comm) as parallel:
+        source = parallel.broadcast_array(expected if comm.rank == 0 else None)
+        assert not source.flags.writeable
+        output = parallel.shared_array(source.shape, source.dtype)
+        for block in parallel.indices(len(blocks)):
+            start, stop = blocks[block]
+            output[start:stop] = 2.0 * source[start:stop]
+        parallel.publish_blocks(output, blocks)
+        np.testing.assert_array_equal(output, 2.0 * expected)
+
+
+def test_nmto_hydrogen_iteration_serial_matches_mpi_density_and_bands(monkeypatch) -> None:
     MPI = _mpi()
     comm = MPI.COMM_WORLD
     scf_input, potential, core, projected = _hydrogen_iteration_input()
+
+    # The frozen fixture is not a ScfPotentialBuild. Keep this test focused on
+    # the downstream NMTO solve; real potential/core blocks have a native case.
+    def frozen_radials(native, built_potential, equations, energies, l_max,
+                       radii, channels, *, parallel, **kwargs):
+        data = None
+        if parallel.rank == 0:
+            radial, jets = _current_radials(scf_input, potential, channels)
+            data = (radial, jets, 0.0)
+        return parallel.comm.bcast(data, root=0)
+
+    monkeypatch.setattr("pymuffintin.mto.scf.sample_nmto_radials", frozen_radials)
 
     serial = _solve_nmto_iteration(scf_input, potential, core)
     serial_projected = {key: value.copy() for key, value in projected.items()}
     with NmtoParallel(comm) as parallel:
         distributed = _solve_nmto_iteration(
             scf_input,
-            potential,
-            core,
+            potential if comm.rank == 0 else None,
+            core if comm.rank == 0 else None,
             parallel=parallel,
         )
-        distributed_density = _export_density(distributed.output_density)
+        if comm.rank == 0:
+            distributed_density = _export_density(distributed.output_density)
+        else:
+            assert distributed.output_density is None
 
     for key, reference in serial_projected.items():
         assert np.all(np.isfinite(projected[key]))
@@ -195,10 +237,11 @@ def test_nmto_hydrogen_iteration_serial_matches_mpi_density_and_bands() -> None:
         rtol=1.0e-10,
         atol=1.0e-12,
     )
-    for key, serial_value in _export_density(serial.output_density).items():
-        np.testing.assert_allclose(
-            distributed_density[key],
-            serial_value,
-            rtol=1.0e-10,
-            atol=1.0e-12,
-        )
+    if comm.rank == 0:
+        for key, serial_value in _export_density(serial.output_density).items():
+            np.testing.assert_allclose(
+                distributed_density[key],
+                serial_value,
+                rtol=1.0e-10,
+                atol=1.0e-12,
+            )

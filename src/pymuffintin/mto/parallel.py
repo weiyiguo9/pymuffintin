@@ -8,7 +8,7 @@ between nodes.  Arrays allocated here must not outlive this context.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Iterator, Sequence
 
 import numpy as np
 from numpy.typing import DTypeLike, NDArray
@@ -87,6 +87,36 @@ class NmtoParallel:
             for rank in range(self.size):
                 start, stop = len(array) * rank // self.size, len(array) * (rank + 1) // self.size
                 self.leaders.Bcast(array[start:stop], root=self._owner_nodes[rank])
+        self._sync(array)
+
+    def broadcast_array(
+        self, source: NDArray | None, *, owner: int = 0
+    ) -> NDArray:
+        """Publish one task owner's array as one read-only buffer per node."""
+        metadata = None if self.rank != owner else (source.shape, source.dtype.str)
+        shape, dtype = self.comm.bcast(metadata, root=owner)
+        shared = self.shared_array(shape, dtype)
+        if self.rank == owner:
+            shared[...] = source
+        self._sync(shared)
+        if self.node.Get_rank() == 0:
+            self.leaders.Bcast(shared, root=self._owner_nodes[owner])
+        self._sync(shared)
+        shared.flags.writeable = False
+        return shared
+
+    def publish_blocks(self, array: NDArray, blocks: Sequence[tuple[int, int]]) -> None:
+        """Publish fixed logical row blocks owned by ``block_index % size``.
+
+        Block boundaries are independent of the communicator size. Writers
+        finish native array borrows before entering this collective phase.
+        """
+        self._sync(array)
+        if self.node.Get_rank() == 0:
+            for block_index, (start, stop) in enumerate(blocks):
+                self.leaders.Bcast(
+                    array[start:stop], root=self._owner_nodes[block_index % self.size]
+                )
         self._sync(array)
 
     @contextmanager

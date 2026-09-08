@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
 from types import ModuleType
 from typing import TYPE_CHECKING, Mapping
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.interpolate import CubicSpline
 
 from ..regional import _complex_spherical_harmonics
 from ..symmetry import SymmetryDataset
@@ -34,6 +35,22 @@ class ScalarRadialSamples:
     large: FloatArray
     small: FloatArray
     boundary_values: FloatArray
+    inverse_mass: FloatArray
+    inverse_speed_of_light: float
+    large_interpolant: CubicSpline = field(init=False, repr=False, compare=False)
+    small_interpolant: CubicSpline = field(init=False, repr=False, compare=False)
+    tangential_interpolant: CubicSpline = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        for name, samples in (
+            ("large_interpolant", self.large),
+            ("small_interpolant", self.small),
+            (
+                "tangential_interpolant",
+                self.inverse_speed_of_light * self.large * self.inverse_mass / self.mesh_radii,
+            ),
+        ):
+            object.__setattr__(self, name, CubicSpline(self.mesh_radii, samples, axis=1))
 
     @classmethod
     def from_export(cls, exported: Mapping[str, object]) -> ScalarRadialSamples:
@@ -45,6 +62,8 @@ class ScalarRadialSamples:
             large=large,
             small=small,
             boundary_values=boundary[:, 0],
+            inverse_mass=np.asarray(exported["inverse_mass"], dtype=np.float64),
+            inverse_speed_of_light=float(exported["inverse_speed_of_light"]),
         )
 
 
@@ -232,7 +251,7 @@ def assemble_nmto_regional_density(
 ) -> object:
     """Project occupied NMTO states into the native regional density layout."""
 
-    interstitial = _fit_interstitial_density(g_vectors, evaluator, parallel)
+    interstitial = _fit_periodic_density(g_vectors, evaluator, parallel)
     labels, offsets, muffin_tins = _project_muffin_tin_density(
         density_l_max, evaluator, parallel
     )
@@ -254,24 +273,25 @@ def assemble_nmto_regional_density(
     return density
 
 
-def _fit_interstitial_density(
+def _fit_periodic_density(
     g_vectors: NDArray[np.int64],
     evaluator: NmtoBasisEvaluator,
     parallel: NmtoParallel | None = None,
 ) -> ComplexArray:
+    """Fit the smooth periodic extension used by native interstitial sampling."""
+
     vectors = np.asarray(g_vectors, dtype=np.int64)
     counts = 2 * np.max(np.abs(vectors), axis=0) + 3
     axes = [(np.arange(count) + 0.5) / count for count in counts]
     fractional = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1).reshape((-1, 3))
     points = fractional @ evaluator.direct_lattice
-    _, sphere_sites = evaluator._nearest_sites(points)
-    fractional = fractional[sphere_sites < 0]
-    points = points[sphere_sites < 0]
     density = _evaluate_density_samples(points, evaluator, parallel)
 
     def fit() -> ComplexArray:
-        design = np.exp(2j * np.pi * (fractional @ vectors.T))
-        coefficients = np.linalg.lstsq(design, density, rcond=None)[0]
+        spectrum = np.fft.fftn(density.reshape(tuple(counts))) / len(density)
+        coefficients = spectrum[tuple((vectors % counts).T)] * np.exp(
+            -1j * np.pi * np.sum(vectors / counts, axis=1)
+        )
         by_vector = {tuple(vector): index for index, vector in enumerate(vectors)}
         for vector, index in by_vector.items():
             opposite = by_vector[tuple(-np.asarray(vector))]

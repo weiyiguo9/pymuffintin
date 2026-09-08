@@ -25,12 +25,16 @@ def test_kink_matrix_uses_exact_radial_energy_jets() -> None:
     slopes = slopes_0[None, :, :] + energies[:, None, None] * slope_dot
     values = 1.2 + energies[:, None] * np.array([0.2, -0.1])
     radial = 0.4 + energies[:, None] * np.array([0.3, 0.5])
+    inverse_masses = 1.0 / (2.0 + energies[:, None] * np.array([0.02, 0.03]))
+    energy_inverse_masses = -np.array([0.02, 0.03]) * inverse_masses**2
     jets = BoundaryJets(
         potential_radii=radii,
         values=values,
         radial_derivatives=radial,
         energy_derivatives=np.broadcast_to(np.array([0.2, -0.1]), values.shape),
         energy_radial_derivatives=np.broadcast_to(np.array([0.3, 0.5]), values.shape),
+        inverse_masses=inverse_masses,
+        energy_inverse_masses=energy_inverse_masses,
     )
     mesh = build_kink_mesh(
         energies,
@@ -41,9 +45,11 @@ def test_kink_matrix_uses_exact_radial_energy_jets() -> None:
     )
 
     log_dot = jets.energy_radial_derivatives / values - radial * jets.energy_derivatives / values**2
-    expected_dot = radii[None, :, None] * np.broadcast_to(slope_dot, slopes.shape)
+    expected_dot = 0.5 * radii[None, :, None] * np.broadcast_to(slope_dot, slopes.shape)
     diagonal = np.arange(2)
-    expected_dot[:, diagonal, diagonal] -= radii[None, :] ** 2 * log_dot
+    expected_dot[:, diagonal, diagonal] -= radii[None, :] ** 2 * (
+        inverse_masses * log_dot + energy_inverse_masses * radial / values
+    )
     np.testing.assert_allclose(mesh.derivatives, expected_dot)
 
 

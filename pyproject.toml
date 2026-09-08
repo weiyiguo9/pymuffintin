@@ -12,6 +12,7 @@ authors = [{name = "weiyiguo9"}]
 requires-python = ">=3.10"
 dependencies = [
     "numpy",
+    "scipy",
     "opt_einsum",
     "sparse-ir>=2.1.2",
     "spglib>=2.7",
@@ -22,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 mpi = ["mpi4py>=4.0"]
 nufft = ["finufft>=2.5.1"]
+nmto = ["finufft>=2.5.1"]
 test = ["pytest"]
 
 [tool.pytest.ini_options]

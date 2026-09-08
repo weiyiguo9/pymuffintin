@@ -25,8 +25,10 @@ FloatArray: TypeAlias = NDArray[np.float64]
 class BoundaryJets:
     """Radial boundary values on an energy mesh.
 
-    Every value array has shape ``(n_energy, n_channel)``.  The last field is
-    the mixed derivative ``d/dE (d f/dr)``.  ``potential_radii`` names the
+    Every value array has shape ``(n_energy, n_channel)``.
+    ``energy_radial_derivatives`` is the mixed derivative ``d/dE (d f/dr)``;
+    ``inverse_masses`` and ``energy_inverse_masses`` specify the physical
+    radial flux and its energy derivative.  ``potential_radii`` names the
     radius role deliberately: screening or augmentation radii are not valid
     substitutes in the kink formula.
     """
@@ -36,6 +38,8 @@ class BoundaryJets:
     radial_derivatives: NumericArray
     energy_derivatives: NumericArray
     energy_radial_derivatives: NumericArray
+    inverse_masses: FloatArray
+    energy_inverse_masses: FloatArray
 
     def __post_init__(self) -> None:
         shape = self.values.shape
@@ -47,6 +51,8 @@ class BoundaryJets:
                 self.radial_derivatives,
                 self.energy_derivatives,
                 self.energy_radial_derivatives,
+                self.inverse_masses,
+                self.energy_inverse_masses,
             )
         ):
             raise ValueError("all boundary-jet arrays must have the same shape")
@@ -92,11 +98,13 @@ def build_kink_mesh(
 
     The convention is exactly
 
-    .. math:: K = \operatorname{diag}(a)
-       [S - \operatorname{diag}(a f'/f)].
+    .. math:: K = \tfrac12\operatorname{diag}(a) S
+       - \operatorname{diag}(a^2 m^{-1} f'/f).
 
-    The logarithmic-derivative derivative is evaluated analytically from the
-    supplied radial energy jets.
+    The interstitial kinetic operator is ``-nabla^2/2``.  The radial flux
+    uses ``m^-1=1/2`` for the nonrelativistic equation, and
+    ``m^-1=[2+(E-V)/c^2]^-1`` for the scalar Koelling--Harmon equation.
+    Both the logarithmic derivative and inverse mass are differentiated.
     """
 
     mesh = np.asarray(energies, dtype=float)
@@ -119,14 +127,20 @@ def build_kink_mesh(
         * boundary_jets.energy_derivatives
         / (boundary_jets.values * boundary_jets.values)
     )
-    values = radii[None, :, None] * slopes
-    derivatives = radii[None, :, None] * slope_dots
+    values = 0.5 * radii[None, :, None] * slopes
+    derivatives = 0.5 * radii[None, :, None] * slope_dots
     diagonal = np.arange(size)
     values[:, diagonal, diagonal] -= (
-        radii[None, :] * radii[None, :] * logarithmic_derivatives
+        radii[None, :] ** 2
+        * boundary_jets.inverse_masses
+        * logarithmic_derivatives
     )
     derivatives[:, diagonal, diagonal] -= (
-        radii[None, :] * radii[None, :] * logarithmic_derivative_dots
+        radii[None, :] ** 2
+        * (
+            boundary_jets.inverse_masses * logarithmic_derivative_dots
+            + boundary_jets.energy_inverse_masses * logarithmic_derivatives
+        )
     )
     return KinkMesh(
         energies=mesh,
