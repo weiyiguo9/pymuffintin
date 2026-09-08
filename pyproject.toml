@@ -20,6 +20,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+mpi = ["mpi4py>=4.0"]
 nufft = ["finufft>=2.5.1"]
 test = ["pytest"]
 

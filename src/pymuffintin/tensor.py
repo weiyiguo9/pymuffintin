@@ -1,13 +1,13 @@
 """Backend-neutral tensor IR: an optimized contraction path plus a small set
 of host-side linear-algebra primitives.
 
-This is a two-tier contract. `contract()` is backend-dispatched: it compiles
-(and caches) a reusable `opt_einsum` expression for a given subscript and
-operand-shape combination, then evaluates it with `backend="auto"` so
-`opt_einsum` infers the execution backend from the operands' own array type.
-A future CTF backend needs to supply only `asarray`/`to_host` through the
-`Backend` protocol below; `opt_einsum` then dispatches the same expression to
-`ctf.einsum`/`ctf.tensordot` on ctf arrays without any change at call sites.
+This is a two-tier contract. `contract()` is operand-driven: it compiles (and
+caches) a reusable `opt_einsum` expression for a given subscript and
+operand-shape combination, then evaluates it with `backend="auto"`. NumPy
+operands therefore remain local NumPy contractions, while CTF operands are
+dispatched dynamically to the installed CTF module. The optional `CtfBackend`
+below supplies the explicit NumPy-to-CTF and CTF-to-NumPy conversions; it is
+not registered or selected automatically.
 
 `eigh`, `solve`, `inv`, `lstsq`, and `pinv` are host-side by declaration, not by omission:
 they run sequentially on host (numpy) arrays regardless of the active
@@ -47,6 +47,37 @@ class _NumpyBackend:
 
     def to_host(self, array: object) -> np.ndarray:
         return np.asarray(array)
+
+
+class CtfBackend:
+    """Adapt the optional CTF Python binding to the backend protocol.
+
+    Importing :mod:`pymuffintin.tensor` does not import CTF or initialize an
+    MPI world. The caller owns the CTF/MPI lifetime and must call
+    ``register_backend(CtfBackend())`` explicitly when CTF is available.
+    ``to_host`` on a CTF tensor materializes the complete tensor and is a
+    collective operation; every rank in the tensor's CTF world must
+    participate. Host NumPy arrays remain local so the existing host-side
+    linear-algebra path is safe with this backend selected.
+    """
+
+    name = "ctf"
+
+    def asarray(self, host: np.ndarray) -> object:
+        """Copy a host array into a CTF tensor using CTF's public helper."""
+
+        import ctf
+
+        return ctf.from_nparray(np.asarray(host))
+
+    def to_host(self, array: object) -> np.ndarray:
+        """Materialize a CTF tensor, or preserve an already-host array."""
+
+        if isinstance(array, np.ndarray):
+            return np.asarray(array)
+        import ctf
+
+        return np.asarray(ctf.to_nparray(array))
 
 
 _BACKENDS: dict[str, Backend] = {}

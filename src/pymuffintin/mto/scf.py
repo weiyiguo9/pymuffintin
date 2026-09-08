@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from importlib import import_module
 from itertools import product
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -27,12 +28,16 @@ from .electrons import (
     solve_nmto_bands,
 )
 from .kink import BoundaryJets, build_kink_mesh
-from .nmto import NmtoResult, build_nmto
+from .nmto import LowdinResult, NmtoResult, build_nmto
+from .parallel import NmtoParallel
 from .usw import (
     RealHarmonic,
     bloch_fold_usw_coefficients,
     usw_matrices_with_energy_derivative,
 )
+
+if TYPE_CHECKING:
+    from mpi4py import MPI
 
 try:
     import tomllib
@@ -455,8 +460,17 @@ class _NmtoIteration:
     valence_normalization: float
 
 
-def run_nmto_scf(scf_input: NmtoScfInput | str | Path) -> NmtoScfResult:
-    """Run the full scalar NMTO density/potential/mixing loop in Python."""
+def run_nmto_scf(
+    scf_input: NmtoScfInput | str | Path,
+    *,
+    comm: MPI.Comm | None = None,
+) -> NmtoScfResult:
+    """Run the full scalar NMTO density/potential/mixing loop in Python.
+
+    When ``comm`` is supplied, Python schedules the energy, k-point, and
+    density-sampling work across its ranks.  Native potential, core, energy,
+    and mixing calls remain local and are repeated on every rank.
+    """
 
     if not isinstance(scf_input, NmtoScfInput):
         scf_input = NmtoScfInput.from_toml(scf_input)
@@ -470,56 +484,86 @@ def run_nmto_scf(scf_input: NmtoScfInput | str | Path) -> NmtoScfResult:
     convergence_history = []
     valence_normalization_history = []
     for iteration in range(1, settings.max_iterations + 1):
-        potential = native.build_regional_potential(density, xc=settings.xc)
-        core = scf_input.core_station.solve(potential)
-        current = _solve_nmto_iteration(scf_input, potential, core)
-        valence_normalization_history.append(current.valence_normalization)
-        energy = native.evaluate_total_energy(
-            potential,
-            current.output_density,
-            current.occupations.band_energy,
-            core.core_eigenvalue_sum,
-            current.occupations.minus_temperature_entropy,
-            previous_total,
-        )
-        energy_history.append(float(energy.total))
-        change = np.inf if energy.energy_change is None else abs(float(energy.energy_change))
-        convergence_history.append((float(energy.density_rms), change))
-        if (
-            energy.density_rms <= settings.density_tolerance
-            and energy.energy_change is not None
-            and change <= settings.energy_tolerance
-        ):
-            restart_checkpoint = None
-            if scf_input.checkpoint is not None:
-                checkpoint_physics = native.CheckpointPhysics(scf_input.checkpoint)
-                restart_checkpoint = checkpoint_physics.restart_checkpoint(
-                    density,
+        context = nullcontext(None) if comm is None else NmtoParallel(comm)
+        with context as parallel:
+            stage = nullcontext() if parallel is None else parallel.local_stage()
+            with stage:
+                potential = native.build_regional_potential(density, xc=settings.xc)
+                core = scf_input.core_station.solve(potential)
+            if parallel is None:
+                current = _solve_nmto_iteration(scf_input, potential, core)
+            else:
+                current = _solve_nmto_iteration(
+                    scf_input,
                     potential,
-                    _checkpoint_annotations(
-                        scf_input,
-                        iteration,
-                        float(energy.total),
-                    ),
+                    core,
+                    parallel=parallel,
                 )
-            return NmtoScfResult(
-                iterations=iteration,
-                total_energy=float(energy.total),
-                chemical_potential=current.occupations.chemical_potential,
-                density=density,
-                potential=potential,
-                bands=current.bands,
-                occupations=current.occupations,
-                energy_history=np.asarray(energy_history),
-                convergence_history=np.asarray(convergence_history),
-                valence_normalization_history=np.asarray(
-                    valence_normalization_history
-                ),
-                k_sampling=scf_input.k_mesh_reduction,
-                _restart_checkpoint=restart_checkpoint,
+            valence_normalization_history.append(current.valence_normalization)
+            stage = nullcontext() if parallel is None else parallel.local_stage()
+            with stage:
+                energy = native.evaluate_total_energy(
+                    potential,
+                    current.output_density,
+                    current.occupations.band_energy,
+                    core.core_eigenvalue_sum,
+                    current.occupations.minus_temperature_entropy,
+                    previous_total,
+                )
+            energy_state = (
+                float(energy.total),
+                float(energy.density_rms),
+                None if energy.energy_change is None else float(energy.energy_change),
             )
-        density = mixer.step(density, current.output_density).density()
-        previous_total = float(energy.total)
+            if parallel is not None:
+                energy_state = parallel.comm.bcast(
+                    energy_state if parallel.rank == 0 else None,
+                    root=0,
+                )
+            total, density_rms, energy_change = energy_state
+            energy_history.append(total)
+            change = np.inf if energy_change is None else abs(energy_change)
+            convergence_history.append((density_rms, change))
+            converged = (
+                density_rms <= settings.density_tolerance
+                and energy_change is not None
+                and change <= settings.energy_tolerance
+            )
+            if converged:
+                restart_checkpoint = None
+                if scf_input.checkpoint is not None:
+                    stage = nullcontext() if parallel is None else parallel.local_stage()
+                    with stage:
+                        checkpoint_physics = native.CheckpointPhysics(scf_input.checkpoint)
+                        restart_checkpoint = checkpoint_physics.restart_checkpoint(
+                            density,
+                            potential,
+                            _checkpoint_annotations(
+                                scf_input,
+                                iteration,
+                                total,
+                            ),
+                        )
+                return NmtoScfResult(
+                    iterations=iteration,
+                    total_energy=total,
+                    chemical_potential=current.occupations.chemical_potential,
+                    density=density,
+                    potential=potential,
+                    bands=current.bands,
+                    occupations=current.occupations,
+                    energy_history=np.asarray(energy_history),
+                    convergence_history=np.asarray(convergence_history),
+                    valence_normalization_history=np.asarray(
+                        valence_normalization_history
+                    ),
+                    k_sampling=scf_input.k_mesh_reduction,
+                    _restart_checkpoint=restart_checkpoint,
+                )
+            stage = nullcontext() if parallel is None else parallel.local_stage()
+            with stage:
+                density = mixer.step(density, current.output_density).density()
+            previous_total = total
     raise RuntimeError(
         f"NMTO SCF did not converge after {settings.max_iterations} iterations; "
         f"density_rms={convergence_history[-1][0]}, energy_change={convergence_history[-1][1]}"
@@ -574,6 +618,8 @@ def _solve_nmto_iteration(
     scf_input: NmtoScfInput,
     potential: object,
     core: object,
+    *,
+    parallel: NmtoParallel | None = None,
 ) -> _NmtoIteration:
     settings = scf_input.settings
     direct = scf_input.lattice
@@ -594,7 +640,9 @@ def _solve_nmto_iteration(
         for l in range(settings.l_max + 1)
         for m in range(-l, l + 1)
     )
-    radial_samples, jets = _current_radials(scf_input, potential, channels)
+    stage = nullcontext() if parallel is None else parallel.local_stage()
+    with stage:
+        radial_samples, jets = _current_radials(scf_input, potential, channels)
 
     exported_potential = potential.export_interstitial()
     zero = np.flatnonzero(np.all(exported_potential["g_vectors"] == 0, axis=1))
@@ -603,81 +651,183 @@ def _solve_nmto_iteration(
     interstitial_zero = float(np.real(exported_potential["components"][0, zero[0]]))
     interstitial_energies = np.asarray(settings.energy_mesh) - interstitial_zero
 
-    coefficients = []
-    slopes = []
-    slope_derivatives = []
-    for energy in interstitial_energies:
-        coefficient, slope, derivative = usw_matrices_with_energy_derivative(
-            float(energy), centers, cluster_radii, channels
+    energy_count = len(interstitial_energies)
+    cluster_size = len(centers) * len(channels)
+    if parallel is None:
+        coefficients, slopes, slope_derivatives = [], [], []
+        for energy in interstitial_energies:
+            coefficient, slope, derivative = usw_matrices_with_energy_derivative(
+                float(energy), centers, cluster_radii, channels
+            )
+            coefficients.append(coefficient)
+            slopes.append(slope)
+            slope_derivatives.append(derivative)
+    else:
+        coefficients = parallel.shared_array(
+            (energy_count, cluster_size, cluster_size), np.float64
         )
-        coefficients.append(coefficient)
-        slopes.append(slope)
-        slope_derivatives.append(derivative)
+        slopes = parallel.shared_array(
+            (energy_count, cluster_size, cluster_size), np.float64
+        )
+        slope_derivatives = parallel.shared_array(
+            (energy_count, cluster_size, cluster_size), np.float64
+        )
+        with parallel.local_stage():
+            for energy_index in parallel.indices(energy_count):
+                coefficient, slope, derivative = usw_matrices_with_energy_derivative(
+                    float(interstitial_energies[energy_index]),
+                    centers,
+                    cluster_radii,
+                    channels,
+                )
+                coefficients[energy_index] = coefficient
+                slopes[energy_index] = slope
+                slope_derivatives[energy_index] = derivative
+        parallel.publish(coefficients)
+        parallel.publish(slopes)
+        parallel.publish(slope_derivatives)
 
-    results = []
-    folded_coefficients = []
-    for k_point in k_cartesian:
-        folded_slopes = np.stack(
-            tuple(
-                _bloch_fold_matrix(
-                    value,
+    k_count = len(k_cartesian)
+    primitive_size = len(site_cartesian) * len(channels)
+    result_shape = (k_count, energy_count, primitive_size, primitive_size)
+    matrix_shape = (k_count, primitive_size, primitive_size)
+    folded_shape = (k_count, energy_count, cluster_size, primitive_size)
+    if parallel is None:
+        results_list = []
+        folded_coefficients_list = []
+        for k_point in k_cartesian:
+            result, folded = _build_nmto_at_k(
+                k_point,
+                slopes,
+                slope_derivatives,
+                coefficients,
+                translations,
+                center_translation,
+                len(site_cartesian),
+                len(channels),
+                settings.energy_mesh,
+                jets,
+            )
+            results_list.append(result)
+            folded_coefficients_list.append(folded)
+        results = tuple(results_list)
+        folded_coefficients = np.asarray(folded_coefficients_list)
+        bands = solve_nmto_bands(results)
+    else:
+        green = parallel.shared_array(result_shape, np.complex128)
+        green_derivatives = parallel.shared_array(result_shape, np.complex128)
+        lagrange_matrices = parallel.shared_array(result_shape, np.complex128)
+        hamiltonians = parallel.shared_array(matrix_shape, np.complex128)
+        overlaps = parallel.shared_array(matrix_shape, np.complex128)
+        lowdin_transformations = parallel.shared_array(matrix_shape, np.complex128)
+        lowdin_hamiltonians = parallel.shared_array(matrix_shape, np.complex128)
+        overlap_eigenvalues = parallel.shared_array(
+            (k_count, primitive_size), np.float64
+        )
+        folded_coefficients = parallel.shared_array(folded_shape, np.complex128)
+        band_energies = parallel.shared_array((k_count, primitive_size), np.float64)
+        band_orthonormal = parallel.shared_array(matrix_shape, np.complex128)
+        band_coefficients = parallel.shared_array(matrix_shape, np.complex128)
+        with parallel.local_stage():
+            for k_index in parallel.indices(k_count):
+                result, folded = _build_nmto_at_k(
+                    k_cartesian[k_index],
+                    slopes,
+                    slope_derivatives,
+                    coefficients,
                     translations,
                     center_translation,
                     len(site_cartesian),
                     len(channels),
-                    k_point,
-                )
-                for value in slopes
-            )
-        )
-        folded_derivatives = np.stack(
-            tuple(
-                _bloch_fold_matrix(
-                    value,
-                    translations,
-                    center_translation,
-                    len(site_cartesian),
-                    len(channels),
-                    k_point,
-                )
-                for value in slope_derivatives
-            )
-        )
-        results.append(
-            build_nmto(
-                build_kink_mesh(
-                    np.asarray(settings.energy_mesh),
-                    folded_slopes,
-                    folded_derivatives,
+                    settings.energy_mesh,
                     jets,
-                    jets.potential_radii,
                 )
+                local_bands = solve_nmto_bands((result,))
+                green[k_index] = result.green
+                green_derivatives[k_index] = result.green_derivatives
+                lagrange_matrices[k_index] = result.lagrange_matrices
+                hamiltonians[k_index] = result.hamiltonian
+                overlaps[k_index] = result.overlap
+                lowdin_transformations[k_index] = result.lowdin.transformation
+                lowdin_hamiltonians[k_index] = result.lowdin.hamiltonian
+                overlap_eigenvalues[k_index] = result.lowdin.overlap_eigenvalues
+                folded_coefficients[k_index] = folded
+                band_energies[k_index] = local_bands.energies[0]
+                band_orthonormal[k_index] = local_bands.orthonormal_coefficients[0]
+                band_coefficients[k_index] = local_bands.coefficients[0]
+        for array in (
+            green,
+            green_derivatives,
+            lagrange_matrices,
+            hamiltonians,
+            overlaps,
+            lowdin_transformations,
+            lowdin_hamiltonians,
+            overlap_eigenvalues,
+            folded_coefficients,
+            band_energies,
+            band_orthonormal,
+            band_coefficients,
+        ):
+            parallel.publish(array)
+        results = tuple(
+            NmtoResult(
+                energies=np.asarray(settings.energy_mesh),
+                green=green[k_index],
+                green_derivatives=green_derivatives[k_index],
+                lagrange_matrices=lagrange_matrices[k_index],
+                hamiltonian=hamiltonians[k_index],
+                overlap=overlaps[k_index],
+                lowdin=LowdinResult(
+                    transformation=lowdin_transformations[k_index],
+                    hamiltonian=lowdin_hamiltonians[k_index],
+                    overlap_eigenvalues=overlap_eigenvalues[k_index],
+                ),
             )
+            for k_index in range(k_count)
         )
-        folded_coefficients.append(
-            np.stack(
-                tuple(
-                    bloch_fold_usw_coefficients(
-                        value,
-                        translations,
-                        len(site_cartesian),
-                        len(channels),
-                        k_point,
-                    )
-                    for value in coefficients
+        bands = NmtoBands(
+            energies=np.array(band_energies, copy=True),
+            orthonormal_coefficients=np.array(band_orthonormal, copy=True),
+            coefficients=np.array(band_coefficients, copy=True),
+        )
+
+    if parallel is None:
+        core_electrons = float(np.sum(core.requested_charges()))
+        occupations = fermi_dirac_occupations(
+            bands.energies,
+            k_weights,
+            settings.electron_count - core_electrons,
+            settings.temperature,
+            state_degeneracy=settings.state_degeneracy,
+        )
+    else:
+        occupation_data = None
+        with parallel.local_stage():
+            if parallel.rank == 0:
+                core_electrons = float(np.sum(core.requested_charges()))
+                root_occupations = fermi_dirac_occupations(
+                    bands.energies,
+                    k_weights,
+                    settings.electron_count - core_electrons,
+                    settings.temperature,
+                    state_degeneracy=settings.state_degeneracy,
                 )
-            )
+                occupation_data = (
+                    root_occupations.chemical_potential,
+                    root_occupations.values,
+                    root_occupations.electron_count,
+                    root_occupations.band_energy,
+                    root_occupations.minus_temperature_entropy,
+                )
+        occupation_data = parallel.comm.bcast(occupation_data, root=0)
+        occupations = NmtoOccupations(
+            chemical_potential=occupation_data[0],
+            values=np.asarray(occupation_data[1]),
+            electron_count=occupation_data[2],
+            band_energy=occupation_data[3],
+            minus_temperature_entropy=occupation_data[4],
         )
-    results = tuple(results)
-    bands = solve_nmto_bands(results)
-    core_electrons = float(np.sum(core.requested_charges()))
-    occupations = fermi_dirac_occupations(
-        bands.energies,
-        k_weights,
-        settings.electron_count - core_electrons,
-        settings.temperature,
-        state_degeneracy=settings.state_degeneracy,
-    )
     evaluator = NmtoBasisEvaluator(
         direct_lattice=direct,
         site_fractional=scf_input.fractional_positions,
@@ -703,7 +853,7 @@ def _solve_nmto_iteration(
     )
     evaluator = replace(
         evaluator,
-        basis_corrections=_represented_basis_corrections(evaluator),
+        basis_corrections=_represented_basis_corrections(evaluator, parallel=parallel),
     )
     valence = assemble_nmto_regional_density(
         scf_input.native,
@@ -712,18 +862,93 @@ def _solve_nmto_iteration(
         scf_input.g_vectors,
         scf_input.density_l_max,
         evaluator,
+        parallel=parallel,
     )
-    represented_electrons = float(valence.electron_count())
+    if parallel is None:
+        represented_electrons = float(valence.electron_count())
+    else:
+        represented_electrons = None
+        with parallel.local_stage():
+            if parallel.rank == 0:
+                represented_electrons = float(valence.electron_count())
+        represented_electrons = parallel.comm.bcast(represented_electrons, root=0)
     valence_normalization = occupations.electron_count / represented_electrons
-    zero = valence.difference(valence)
-    valence = zero.add_scaled(valence_normalization, valence)
-    output_density = valence.add_scaled(1.0, core.density())
+    stage = nullcontext() if parallel is None else parallel.local_stage()
+    with stage:
+        zero = valence.difference(valence)
+        valence = zero.add_scaled(valence_normalization, valence)
+        output_density = valence.add_scaled(1.0, core.density())
     return _NmtoIteration(
         bands, occupations, output_density, valence_normalization
     )
 
 
-def _represented_basis_corrections(evaluator: NmtoBasisEvaluator) -> ComplexArray:
+def _build_nmto_at_k(
+    k_point: FloatArray,
+    slopes: Sequence[FloatArray] | FloatArray,
+    slope_derivatives: Sequence[FloatArray] | FloatArray,
+    coefficients: Sequence[FloatArray] | FloatArray,
+    translations: FloatArray,
+    center_translation: int,
+    site_count: int,
+    channel_count: int,
+    energy_mesh: Sequence[float],
+    jets: BoundaryJets,
+) -> tuple[NmtoResult, ComplexArray]:
+    folded_slopes = np.stack(
+        tuple(
+            _bloch_fold_matrix(
+                value,
+                translations,
+                center_translation,
+                site_count,
+                channel_count,
+                k_point,
+            )
+            for value in slopes
+        )
+    )
+    folded_derivatives = np.stack(
+        tuple(
+            _bloch_fold_matrix(
+                value,
+                translations,
+                center_translation,
+                site_count,
+                channel_count,
+                k_point,
+            )
+            for value in slope_derivatives
+        )
+    )
+    result = build_nmto(
+        build_kink_mesh(
+            np.asarray(energy_mesh),
+            folded_slopes,
+            folded_derivatives,
+            jets,
+            jets.potential_radii,
+        )
+    )
+    folded_coefficients = np.stack(
+        tuple(
+            bloch_fold_usw_coefficients(
+                value,
+                translations,
+                site_count,
+                channel_count,
+                k_point,
+            )
+            for value in coefficients
+        )
+    )
+    return result, folded_coefficients
+
+
+def _represented_basis_corrections(
+    evaluator: NmtoBasisEvaluator,
+    parallel: NmtoParallel | None = None,
+) -> ComplexArray:
     """Align sampled basis overlaps with the analytic NMTO overlap matrices."""
 
     axis = (np.arange(18) + 0.5) / 18
@@ -732,22 +957,43 @@ def _represented_basis_corrections(evaluator: NmtoBasisEvaluator) -> ComplexArra
     ).reshape((-1, 3))
     points = fractional @ evaluator.direct_lattice
     volume_weight = abs(np.linalg.det(evaluator.direct_lattice)) / len(points)
-    corrections = []
-    for k_index, result in enumerate(evaluator.results):
-        large, small = evaluator._basis_values(points, k_index)
-        represented = volume_weight * (
-            large.conj().T @ large + small.conj().T @ small
-        )
-        represented = 0.5 * (represented + represented.conj().T)
-        target = 0.5 * (result.overlap + result.overlap.conj().T)
-        represented_cholesky = np.linalg.cholesky(represented)
-        target_cholesky = np.linalg.cholesky(target)
-        corrections.append(
-            np.linalg.solve(
-                represented_cholesky.conj().T,
-                target_cholesky.conj().T,
+    owned_points = points if parallel is None else points[parallel.point_slice(len(points))]
+    local_grams = np.zeros(
+        (
+            len(evaluator.results),
+            evaluator.bands.coefficients.shape[1],
+            evaluator.bands.coefficients.shape[1],
+        ),
+        dtype=np.complex128,
+    )
+    stage = nullcontext() if parallel is None else parallel.local_stage()
+    with stage:
+        for k_index in range(len(evaluator.results)):
+            large, small = evaluator._basis_values(owned_points, k_index)
+            local_grams[k_index] = volume_weight * (
+                large.conj().T @ large + small.conj().T @ small
             )
-        )
+    if parallel is None:
+        represented_grams = local_grams
+    else:
+        represented_grams = np.empty_like(local_grams)
+        parallel.comm.Allreduce(local_grams, represented_grams)
+    corrections = []
+    stage = nullcontext() if parallel is None else parallel.local_stage()
+    with stage:
+        for represented, result in zip(
+            represented_grams, evaluator.results, strict=True
+        ):
+            represented = 0.5 * (represented + represented.conj().T)
+            target = 0.5 * (result.overlap + result.overlap.conj().T)
+            represented_cholesky = np.linalg.cholesky(represented)
+            target_cholesky = np.linalg.cholesky(target)
+            corrections.append(
+                np.linalg.solve(
+                    represented_cholesky.conj().T,
+                    target_cholesky.conj().T,
+                )
+            )
     return np.asarray(corrections)
 
 

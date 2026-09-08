@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from itertools import product
 from types import ModuleType
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 import numpy as np
 from numpy.typing import NDArray
@@ -16,6 +17,9 @@ from ..tensor import contract
 from .electrons import NmtoBands, NmtoOccupations, interpolate_nmto_basis, nmto_density_matrices
 from .nmto import NmtoResult
 from .usw import RealHarmonic, evaluate_folded_usw, real_spherical_harmonics
+
+if TYPE_CHECKING:
+    from .parallel import NmtoParallel
 
 
 FloatArray = NDArray[np.float64]
@@ -224,30 +228,36 @@ def assemble_nmto_regional_density(
     g_vectors: NDArray[np.int64],
     density_l_max: int,
     evaluator: NmtoBasisEvaluator,
+    parallel: NmtoParallel | None = None,
 ) -> object:
     """Project occupied NMTO states into the native regional density layout."""
 
-    interstitial = _fit_interstitial_density(g_vectors, evaluator)
+    interstitial = _fit_interstitial_density(g_vectors, evaluator, parallel)
     labels, offsets, muffin_tins = _project_muffin_tin_density(
-        density_l_max, evaluator
+        density_l_max, evaluator, parallel
     )
     interstitial_components = np.zeros((4, len(g_vectors)), dtype=np.complex128)
     interstitial_components[0] = interstitial
     mt_components = np.zeros((4, len(muffin_tins)), dtype=np.complex128)
     mt_components[0] = muffin_tins
-    return native.RegionalDensity(
-        structure,
-        field_layout,
-        "complex-condon-shortley",
-        interstitial_components,
-        labels,
-        offsets,
-        mt_components,
-    )
+    stage = nullcontext() if parallel is None else parallel.local_stage()
+    with stage:
+        density = native.RegionalDensity(
+            structure,
+            field_layout,
+            "complex-condon-shortley",
+            interstitial_components,
+            labels,
+            offsets,
+            mt_components,
+        )
+    return density
 
 
 def _fit_interstitial_density(
-    g_vectors: NDArray[np.int64], evaluator: NmtoBasisEvaluator
+    g_vectors: NDArray[np.int64],
+    evaluator: NmtoBasisEvaluator,
+    parallel: NmtoParallel | None = None,
 ) -> ComplexArray:
     vectors = np.asarray(g_vectors, dtype=np.int64)
     counts = 2 * np.max(np.abs(vectors), axis=0) + 3
@@ -257,29 +267,41 @@ def _fit_interstitial_density(
     _, sphere_sites = evaluator._nearest_sites(points)
     fractional = fractional[sphere_sites < 0]
     points = points[sphere_sites < 0]
-    density = evaluator._raw_density(points)
-    design = np.exp(2j * np.pi * (fractional @ vectors.T))
-    coefficients = np.linalg.lstsq(design, density, rcond=None)[0]
-    by_vector = {tuple(vector): index for index, vector in enumerate(vectors)}
-    for vector, index in by_vector.items():
-        opposite = by_vector[tuple(-np.asarray(vector))]
-        average = 0.5 * (coefficients[index] + coefficients[opposite].conj())
-        coefficients[index] = average
-        coefficients[opposite] = average.conj()
-    zero = by_vector[(0, 0, 0)]
-    coefficients[zero] = coefficients[zero].real
-    if evaluator.symmetry is not None:
-        coefficients = _symmetrize_fourier(
-            vectors,
-            coefficients,
-            evaluator.symmetry,
-            evaluator._symmetry_operations(),
-        )
-    return coefficients
+    density = _evaluate_density_samples(points, evaluator, parallel)
+
+    def fit() -> ComplexArray:
+        design = np.exp(2j * np.pi * (fractional @ vectors.T))
+        coefficients = np.linalg.lstsq(design, density, rcond=None)[0]
+        by_vector = {tuple(vector): index for index, vector in enumerate(vectors)}
+        for vector, index in by_vector.items():
+            opposite = by_vector[tuple(-np.asarray(vector))]
+            average = 0.5 * (coefficients[index] + coefficients[opposite].conj())
+            coefficients[index] = average
+            coefficients[opposite] = average.conj()
+        zero = by_vector[(0, 0, 0)]
+        coefficients[zero] = coefficients[zero].real
+        if evaluator.symmetry is not None:
+            coefficients = _symmetrize_fourier(
+                vectors,
+                coefficients,
+                evaluator.symmetry,
+                evaluator._symmetry_operations(),
+            )
+        return coefficients
+
+    if parallel is None:
+        return fit()
+    coefficients = None
+    with parallel.local_stage():
+        if parallel.rank == 0:
+            coefficients = fit()
+    return parallel.comm.bcast(coefficients, root=0)
 
 
 def _project_muffin_tin_density(
-    density_l_max: int, evaluator: NmtoBasisEvaluator
+    density_l_max: int,
+    evaluator: NmtoBasisEvaluator,
+    parallel: NmtoParallel | None = None,
 ) -> tuple[NDArray[np.int64], NDArray[np.int64], ComplexArray]:
     density_channels = tuple(
         RealHarmonic(l, m)
@@ -300,18 +322,27 @@ def _project_muffin_tin_density(
     harmonics = _complex_spherical_harmonics(directions, density_channels)
     labels = []
     offsets = [0]
-    site_samples = []
+    site_points = []
     site_cartesian = evaluator.site_fractional @ evaluator.direct_lattice
     for site, center in enumerate(site_cartesian):
         mesh = evaluator.radial_samples[(site, 0)].mesh_radii
         points = (
             center[None, None, :] + mesh[:, None, None] * directions[None, :, :]
         ).reshape((-1, 3))
-        density = evaluator._raw_density(points).reshape((len(mesh), len(directions)))
+        site_points.append(points)
+    all_points = np.concatenate(site_points)
+    all_density = _evaluate_density_samples(all_points, evaluator, parallel)
+    site_samples = []
+    start = 0
+    for site in range(len(site_cartesian)):
+        mesh = evaluator.radial_samples[(site, 0)].mesh_radii
+        stop = start + len(mesh) * len(directions)
+        density = all_density[start:stop].reshape((len(mesh), len(directions)))
         coefficients = contract(
             "ra,a,aL->rL", density, weights, harmonics.conj()
         )
         site_samples.append(coefficients)
+        start = stop
     if evaluator.symmetry is not None:
         site_samples = _symmetrize_muffin_tins(
             site_samples,
@@ -332,6 +363,22 @@ def _project_muffin_tin_density(
         np.asarray(offsets, dtype=np.int64),
         np.asarray(samples, dtype=np.complex128),
     )
+
+
+def _evaluate_density_samples(
+    points: FloatArray,
+    evaluator: NmtoBasisEvaluator,
+    parallel: NmtoParallel | None,
+) -> FloatArray:
+    if parallel is None:
+        return evaluator._raw_density(points)
+    density = parallel.shared_array((len(points),), np.float64)
+    owned = parallel.point_slice(len(points))
+    with parallel.local_stage():
+        if owned.start < owned.stop:
+            density[owned] = evaluator._raw_density(points[owned])
+    parallel.publish_rows(density)
+    return density
 
 
 def _symmetrize_fourier(

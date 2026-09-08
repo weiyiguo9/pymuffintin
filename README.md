@@ -141,15 +141,79 @@ using `g-cutoff = 5.0 Bohr^-1`; the two differ by less than 2 mHa. These are
 same-checkpoint representation-pipeline regressions, not material or cross-code
 accuracy claims.
 
+### MPI NMTO-SCF
+
+Install the optional MPI dependency with `pip install -e ".[mpi]"` and pass
+the caller's communicator explicitly:
+
+```python
+from mpi4py import MPI
+from pymuffintin.mto import run_nmto_scf
+
+result = run_nmto_scf("input.toml", comm=MPI.COMM_WORLD)
+if MPI.COMM_WORLD.rank == 0:
+    print(result.total_energy)
+```
+
+Run the script with, for example,
+`mpiexec -n 4 python -m mpi4py run_nmto.py`. All ranks must call the solver
+with the same input. Without `comm`, the ordinary serial route is used.
+The application owns MPI initialization/finalization and output; the solver
+does not initialize a second native MPI scheduler or write checkpoints.
+
+Energy-node USW construction and k-point NMTO solves are rank-distributed.
+Basis-overlap and density sampling use point blocks, so sampling can use
+more ranks than there are irreducible k points. Large USW and folded-basis
+buffers use MPI-3 shared windows (one copy per shared-memory domain), with
+inter-node transfers performed by node leaders. Shared windows live for one
+iteration; returned results do not borrow their storage.
+
+Occupations use the complete weighted spectrum and a common chemical
+potential. Density projection retains the serial least-squares algorithm,
+and normalization follows the assembled global density. Native potential,
+core, energy, and mixing operations remain rank-local and replicated in
+this first implementation; this is not a distributed native field solver.
+Small spectra and result matrices are also replicated. Rank-local tensor
+contractions continue through `tensor.contract` on NumPy blocks, not through
+collective CTF calls inside independently scheduled tasks.
+
+Budget native threads together with MPI ranks; a one-thread-per-rank starting
+point sets `OMP_NUM_THREADS=1`, `OPENBLAS_NUM_THREADS=1`,
+`VECLIB_MAXIMUM_THREADS=1`, and `RAYON_NUM_THREADS=1` before launch. This
+execution model does not require a no-GIL Python build. MPI consistency
+checks are not diamond material-accuracy or scaling acceptance.
+
+The focused collective checks can be run with
+`mpiexec -n 4 python -m mpi4py -m pytest tests/test_nmto_mpi.py tests/test_tensor_ctf.py -q`.
+The CTF check requires its separately installed Python binding. A single
+machine exercises shared-memory execution, not physical cross-node scaling.
+
 ## Tensor backend
 
 All fixed-structure multilinear contractions in `auxiliary/` and `mbpt/`
 route through `pymuffintin.tensor.contract`, an `opt_einsum`-backed IR that
 compiles and caches one expression per `(subscript, operand shapes)` pair
 and evaluates it with backend dispatch following the operands' own array
-type. A future CTF backend plugs in by registering an object with a `name`
-and `asarray`/`to_host` methods (`tensor.register_backend`,
-`tensor.set_backend`); no call site changes.
+type. The optional `tensor.CtfBackend` uses CTF's own Python binding through
+the existing `asarray`/`to_host` interface:
+
+```python
+from pymuffintin import tensor
+
+backend = tensor.CtfBackend()  # CTF must already be installed against the same MPI
+tensor.register_backend(backend)
+tensor.set_backend("ctf")
+a = backend.asarray(host_a)
+b = backend.asarray(host_b)
+c = tensor.contract("ab,bc->ac", a, b)
+host_c = backend.to_host(c)
+```
+
+CTF conversions and contractions must be entered collectively by its world
+with compatible shapes. Selecting a backend does not convert NumPy operands
+automatically or change their rank-local contraction behavior. CTF is not
+used as a second scheduler inside NMTO's rank-local work. The adapter does
+not select a CTF subcommunicator or manage MPI's lifetime.
 
 `tensor.eigh`, `tensor.solve`, `tensor.inv`, `tensor.lstsq`, and
 `tensor.pinv` are host-side gather
