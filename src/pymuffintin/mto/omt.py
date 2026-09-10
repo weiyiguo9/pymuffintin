@@ -1,4 +1,10 @@
-"""Periodic optimized-muffin-tin (OMT) potential fitting.
+"""Periodic overlapping-muffin-tin (OMT) potential fitting.
+
+OMT abbreviates *overlapping* muffin-tin, Andersen's OMTA: spherical
+potential wells that are allowed to overlap, superposed on a constant.  The
+least-squares construction below is one way to determine such a potential;
+it is not what the acronym stands for, and earlier versions of this
+docstring said "optimized" by mistake.
 
 The represented scalar field is
 
