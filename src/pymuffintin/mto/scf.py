@@ -764,6 +764,7 @@ def _solve_nmto_iteration(
             if parallel.rank == 0:
                 exported_potential = potential.export_interstitial()
     interstitial_energies = np.asarray(settings.energy_mesh) - interstitial_zero
+    started = perf_counter()
     periodic_samples = _periodic_samples(
         direct,
         site_cartesian,
@@ -774,12 +775,29 @@ def _solve_nmto_iteration(
         settings,
         parallel,
     )
+    if parallel is None:
+        if timing is not None:
+            timing("nmto.periodic_samples", perf_counter() - started)
+    else:
+        with parallel.local_stage():
+            if parallel.rank == 0 and timing is not None:
+                timing("nmto.periodic_samples", perf_counter() - started)
+
+    started = perf_counter()
     results = _periodic_nmto_results(
         periodic_samples,
         settings.energy_mesh,
         jets,
         parallel,
     )
+    if parallel is None:
+        if timing is not None:
+            timing("nmto.matrices", perf_counter() - started)
+    else:
+        with parallel.local_stage():
+            if parallel.rank == 0 and timing is not None:
+                timing("nmto.matrices", perf_counter() - started)
+
     if parallel is None:
         core_electrons = float(np.sum(core.requested_charges()))
     else:
@@ -788,9 +806,18 @@ def _solve_nmto_iteration(
             if parallel.rank == 0:
                 core_electrons = float(np.sum(core.requested_charges()))
         core_electrons = parallel.comm.bcast(core_electrons, root=0)
+    started = perf_counter()
     bands, occupations = _bands_and_occupations(
         results, k_weights, settings, core_electrons, parallel
     )
+    if parallel is None:
+        if timing is not None:
+            timing("nmto.bands.initial", perf_counter() - started)
+    else:
+        with parallel.local_stage():
+            if parallel.rank == 0 and timing is not None:
+                timing("nmto.bands.initial", perf_counter() - started)
+
     evaluator = PeriodicNmtoBasisEvaluator(
         direct_lattice=direct,
         site_fractional=scf_input.fractional_positions,
@@ -812,6 +839,7 @@ def _solve_nmto_iteration(
             else scf_input.k_mesh_reduction.active_operation_indices
         ),
     )
+    started = perf_counter()
     corrections = full_potential_corrections(
         evaluator,
         exported_potential,
@@ -819,6 +847,14 @@ def _solve_nmto_iteration(
         angular_order=settings.matrix_angular_order,
         parallel=parallel,
     )
+    if parallel is None:
+        if timing is not None:
+            timing("nmto.full_potential", perf_counter() - started)
+    else:
+        with parallel.local_stage():
+            if parallel.rank == 0 and timing is not None:
+                timing("nmto.full_potential", perf_counter() - started)
+
     results = tuple(
         replace(
             result,
@@ -833,10 +869,20 @@ def _solve_nmto_iteration(
         )
         for result, correction in zip(results, corrections, strict=True)
     )
+    started = perf_counter()
     bands, occupations = _bands_and_occupations(
         results, k_weights, settings, core_electrons, parallel
     )
+    if parallel is None:
+        if timing is not None:
+            timing("nmto.bands.corrected", perf_counter() - started)
+    else:
+        with parallel.local_stage():
+            if parallel.rank == 0 and timing is not None:
+                timing("nmto.bands.corrected", perf_counter() - started)
+
     evaluator = replace(evaluator, results=results, bands=bands, occupations=occupations)
+    started = perf_counter()
     valence = assemble_nmto_regional_density(
         scf_input.native,
         scf_input.structure,
@@ -846,6 +892,15 @@ def _solve_nmto_iteration(
         evaluator,
         parallel=parallel,
     )
+    if parallel is None:
+        if timing is not None:
+            timing("nmto.density", perf_counter() - started)
+    else:
+        with parallel.local_stage():
+            if parallel.rank == 0 and timing is not None:
+                timing("nmto.density", perf_counter() - started)
+
+    started = perf_counter()
     if parallel is None:
         represented_electrons = float(valence.electron_count())
         valence_normalization = occupations.electron_count / represented_electrons
@@ -863,6 +918,13 @@ def _solve_nmto_iteration(
                 valence = zero.add_scaled(valence_normalization, valence)
                 output_density = valence.add_scaled(1.0, core.density())
         valence_normalization = parallel.comm.bcast(valence_normalization, root=0)
+    if parallel is None:
+        if timing is not None:
+            timing("nmto.density.normalization", perf_counter() - started)
+    else:
+        with parallel.local_stage():
+            if parallel.rank == 0 and timing is not None:
+                timing("nmto.density.normalization", perf_counter() - started)
     return _NmtoIteration(
         bands, occupations, output_density, valence_normalization
     )
