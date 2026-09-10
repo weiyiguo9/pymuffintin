@@ -198,6 +198,32 @@ and the maximum hard- and potential-sphere overlap fractions;
 `NmtoScfResult` keeps `reference_constant_history` and
 `reference_rms_history` per iteration.
 
+The energy mesh must cover the bands that are to be trusted. An NMTO is
+exact for the reference potential only at its nodes; states far outside the
+node window are extrapolated, and the OMT recipe extrapolates less gracefully
+than the default one. For conduction bands add a node in the conduction
+region rather than moving the valence nodes:
+
+```toml
+[task.scf.nmto]
+energy-mesh = [-0.35, 0.25, 0.85]   # valence-band bottom, mid gap region, conduction
+```
+
+Diamond at a fixed potential (2x2x2 probe, converged LAPW on the same
+potential as reference): with the two-node mesh `[-0.1, 0.2]` the four lowest
+conduction bands deviate by 0.34 eV RMS for the default recipe and 0.44 eV
+for `omt` with `s = 1.2 a`; with the three-node mesh above they deviate by
+0.18 eV and 0.12 eV, and by 0.11 eV for `omt` plus `l-max = 3`. The valence
+deviation (about 0.24 eV RMS for `omt`, 0.28 eV for the default) is
+insensitive to the node placement, the overlap beyond `s = 1.2 a`, `l-max`,
+and every numerical cutoff; it is the minimal-basis limit against the large
+non-spherical potential inside the spheres, not a discretisation error.
+Potential-sphere overlaps beyond about 20% keep lowering the fit RMS without
+improving any band. The kinetic-energy overlap approximation was measured by
+comparing the kink-derived overlap matrix with a direct quadrature of the
+orbitals: the band norms change by at most 3e-4 between `s = a` and
+`s = 1.4 a`, far below the quadrature noise of the direct integrals.
+
 The energy convention is Hartree throughout, with the wave equation written as
 `(-nabla^2/2 - E) psi = 0`. The finite-cluster constant-density regression uses
 all 25 real harmonics through `l_max=4` and reproduces the published Table I
