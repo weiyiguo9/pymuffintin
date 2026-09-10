@@ -82,6 +82,7 @@ def _hydrogen_iteration_input():
         electron_count=1.0,
         temperature=0.02,
         state_degeneracy=2.0,
+        reference_potential="spherical-mt",
     )
     scf_input = SimpleNamespace(
         native=SimpleNamespace(RegionalDensity=regional_density),
@@ -90,6 +91,7 @@ def _hydrogen_iteration_input():
         lattice=8.0 * np.eye(3),
         fractional_positions=np.asarray([[1.25, -0.5, 0.5]], dtype=np.float64),
         muffin_tin_radii=np.asarray([1.0], dtype=np.float64),
+        potential_sphere_radii=np.asarray([1.0], dtype=np.float64),
         g_vectors=g_vectors,
         density_l_max=0,
         radial_equations=("scalar-koelling-harmon",),

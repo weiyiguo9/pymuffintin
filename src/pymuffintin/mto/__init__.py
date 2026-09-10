@@ -28,12 +28,25 @@ from .vd import (
 from .omt import (
     OmtFit,
     OmtFitDiagnostics,
+    OmtShellReference,
     evaluate_omt,
     fit_omt,
+    fit_omt_shells,
+    nearest_neighbor_distance,
     omt_design_matrix,
     overlap_fractions,
     periodic_distances,
     radial_hat_matrix,
+    shell_hat_matrix,
+)
+from .shell import (
+    FreeContinuation,
+    continuation_jets,
+    exponential_mesh,
+    exponential_mesh_count,
+    free_continuation,
+    snap_to_exponential_mesh,
+    sphere_images,
 )
 from .kink import (
     BoundaryJets,
@@ -79,10 +92,13 @@ __all__ = [
     "NmtoScfInput",
     "NmtoScfResult",
     "NmtoScfSettings",
+    "recipe_annotations",
     "NmtoBands",
     "NmtoOccupations",
+    "FreeContinuation",
     "OmtFit",
     "OmtFitDiagnostics",
+    "OmtShellReference",
     "RealHarmonic",
     "VdCoefficients",
     "bare_structure_matrix",
@@ -100,8 +116,17 @@ __all__ = [
     "evaluate_usw",
     "evaluate_bloch_usw",
     "evaluate_folded_usw",
+    "continuation_jets",
     "evaluate_omt",
+    "exponential_mesh",
+    "exponential_mesh_count",
     "fit_omt",
+    "fit_omt_shells",
+    "free_continuation",
+    "nearest_neighbor_distance",
+    "shell_hat_matrix",
+    "snap_to_exponential_mesh",
+    "sphere_images",
     "fermi_dirac_occupations",
     "green_mesh",
     "interstitial_volume",
@@ -128,7 +153,13 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name in {"NmtoScfInput", "NmtoScfResult", "NmtoScfSettings", "run_nmto_scf"}:
+    if name in {
+        "NmtoScfInput",
+        "NmtoScfResult",
+        "NmtoScfSettings",
+        "recipe_annotations",
+        "run_nmto_scf",
+    }:
         from . import scf
 
         return getattr(scf, name)

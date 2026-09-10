@@ -29,7 +29,16 @@ ComplexArray = NDArray[np.complex128]
 
 @dataclass(frozen=True)
 class ScalarRadialSamples:
-    """Energy-major large and small physical radial functions for one site/l."""
+    """Energy-major large and small physical radial functions for one site/l.
+
+    ``boundary_values`` is the normalization applied to every sampled
+    function: natively ``u(a)`` at the hard-sphere radius.  When the mesh
+    extends into an overlapping potential shell, ``mesh_radii`` runs to the
+    potential radius, ``shell_start`` indexes the hard radius, and
+    ``shell_free_large`` holds the free continuation ``u0`` on
+    ``mesh_radii[shell_start:]``; the normalization is then ``u0(a)`` and
+    ``shell_interpolant`` interpolates ``u - u0`` on the shell.
+    """
 
     mesh_radii: FloatArray
     large: FloatArray
@@ -37,9 +46,15 @@ class ScalarRadialSamples:
     boundary_values: FloatArray
     inverse_mass: FloatArray
     inverse_speed_of_light: float
+    hard_radius: float | None = None
+    shell_start: int | None = None
+    shell_free_large: FloatArray | None = None
     large_interpolant: CubicSpline = field(init=False, repr=False, compare=False)
     small_interpolant: CubicSpline = field(init=False, repr=False, compare=False)
     tangential_interpolant: CubicSpline = field(init=False, repr=False, compare=False)
+    shell_interpolant: CubicSpline | None = field(
+        init=False, repr=False, compare=False, default=None
+    )
 
     def __post_init__(self) -> None:
         for name, samples in (
@@ -51,6 +66,31 @@ class ScalarRadialSamples:
             ),
         ):
             object.__setattr__(self, name, CubicSpline(self.mesh_radii, samples, axis=1))
+        if self.shell_free_large is None or self.shell_start is None:
+            return
+        shell_radii = self.mesh_radii[self.shell_start :]
+        free = np.asarray(self.shell_free_large, dtype=np.float64)
+        if free.shape != (self.large.shape[0], len(shell_radii)):
+            raise ValueError("shell_free_large must have shape (n_energy, n_shell)")
+        if len(shell_radii) < 2:
+            return
+        object.__setattr__(
+            self,
+            "shell_interpolant",
+            CubicSpline(shell_radii, self.large[:, self.shell_start :] - free, axis=1),
+        )
+
+    @property
+    def has_shell(self) -> bool:
+        return self.shell_interpolant is not None
+
+    @property
+    def regional_radii(self) -> FloatArray:
+        """Return the native mesh radii up to the hard sphere, excluding any shell."""
+
+        if self.shell_start is None:
+            return self.mesh_radii
+        return self.mesh_radii[: self.shell_start + 1]
 
     @classmethod
     def from_export(cls, exported: Mapping[str, object]) -> ScalarRadialSamples:
@@ -345,7 +385,7 @@ def _project_muffin_tin_density(
     site_points = []
     site_cartesian = evaluator.site_fractional @ evaluator.direct_lattice
     for site, center in enumerate(site_cartesian):
-        mesh = evaluator.radial_samples[(site, 0)].mesh_radii
+        mesh = evaluator.radial_samples[(site, 0)].regional_radii
         points = (
             center[None, None, :] + mesh[:, None, None] * directions[None, :, :]
         ).reshape((-1, 3))
@@ -355,7 +395,7 @@ def _project_muffin_tin_density(
     site_samples = []
     start = 0
     for site in range(len(site_cartesian)):
-        mesh = evaluator.radial_samples[(site, 0)].mesh_radii
+        mesh = evaluator.radial_samples[(site, 0)].regional_radii
         stop = start + len(mesh) * len(directions)
         density = all_density[start:stop].reshape((len(mesh), len(directions)))
         coefficients = contract(
@@ -455,13 +495,13 @@ def _symmetrize_muffin_tins(
 
     result = []
     for target in range(site_count):
-        target_mesh = evaluator.radial_samples[(target, 0)].mesh_radii
+        target_mesh = evaluator.radial_samples[(target, 0)].regional_radii
         averaged = np.zeros((len(target_mesh), len(directions)), dtype=np.complex128)
         for mapping, cartesian_rotation in zip(
             operation_maps, cartesian_rotations, strict=True
         ):
             source = int(np.flatnonzero(mapping == target)[0])
-            source_mesh = evaluator.radial_samples[(source, 0)].mesh_radii
+            source_mesh = evaluator.radial_samples[(source, 0)].regional_radii
             source_coefficients = coefficients[source]
             if not np.array_equal(source_mesh, target_mesh):
                 source_coefficients = np.stack(

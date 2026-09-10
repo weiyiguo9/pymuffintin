@@ -30,11 +30,14 @@ from .parallel import NmtoParallel
 from .periodic import PeriodicUswGeometry, PeriodicUswSample
 from .periodic_density import PeriodicNmtoBasisEvaluator
 from .full_potential import full_potential_corrections
+from .omt import nearest_neighbor_distance, overlap_fractions
 from .potential import (
     build_nmto_potential,
     sample_nmto_radials,
+    sample_omt_radials,
     solve_nmto_core,
 )
+from .shell import snap_to_exponential_mesh
 from .usw import RealHarmonic
 
 if TYPE_CHECKING:
@@ -58,6 +61,9 @@ def _int_tuple(values: Sequence[int], size: int, name: str) -> tuple[int, ...]:
     if len(result) != size:
         raise ValueError(f"{name} must contain {size} values")
     return result
+
+
+REFERENCE_POTENTIALS = frozenset({"spherical-mt", "omt"})
 
 
 @dataclass(frozen=True)
@@ -89,6 +95,9 @@ class NmtoScfSettings:
     symmetry: bool = True
     symprec: float = 1.0e-5
     include_time_reversal: bool = True
+    reference_potential: str = "spherical-mt"
+    potential_radius_scale: float = 1.0
+    potential_radii: Mapping[str, float] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -124,6 +133,24 @@ class NmtoScfSettings:
             raise ValueError("Pulay mixing requires a positive history length")
         if self.symprec <= 0.0:
             raise ValueError("symprec must be positive")
+        if self.reference_potential not in REFERENCE_POTENTIALS:
+            raise ValueError(
+                f"reference_potential must be one of {sorted(REFERENCE_POTENTIALS)}"
+            )
+        if self.potential_radius_scale < 1.0:
+            raise ValueError("potential_radius_scale must not be below one")
+        if self.potential_radii is not None:
+            object.__setattr__(
+                self,
+                "potential_radii",
+                {str(key): float(value) for key, value in self.potential_radii.items()},
+            )
+        if self.reference_potential != "omt" and (
+            self.potential_radius_scale != 1.0 or self.potential_radii
+        ):
+            raise ValueError(
+                "potential spheres beyond the hard spheres require reference_potential='omt'"
+            )
 
     @classmethod
     def from_task(cls, task: Mapping[str, Any]) -> NmtoScfSettings:
@@ -159,6 +186,13 @@ class NmtoScfSettings:
             lattice_sum_radius=float(nmto["lattice-sum-radius"]),
             reference_energy=float(nmto["reference-energy"]),
             matrix_angular_order=int(nmto["matrix-angular-order"]),
+            reference_potential=str(nmto.get("reference-potential", "spherical-mt")),
+            potential_radius_scale=float(nmto.get("potential-radius-scale", 1.0)),
+            potential_radii=(
+                None
+                if nmto.get("potential-radii") is None
+                else dict(nmto["potential-radii"])
+            ),
             symmetry=bool(symmetry.get("enabled", True)),
             symprec=float(symmetry.get("symprec", 1.0e-5)),
             include_time_reversal=bool(symmetry.get("include-time-reversal", True)),
@@ -184,6 +218,7 @@ class NmtoScfInput:
     radial_equations: tuple[str, ...]
     settings: NmtoScfSettings
     checkpoint: object | None = None
+    potential_sphere_radii: FloatArray | None = None
     symmetry_dataset: SymmetryDataset | None = field(init=False)
     k_mesh_reduction: IrreducibleKMesh | None = field(init=False)
 
@@ -208,6 +243,24 @@ class NmtoScfInput:
         object.__setattr__(self, "atomic_numbers", numbers)
         object.__setattr__(self, "muffin_tin_radii", radii)
         object.__setattr__(self, "g_vectors", g_vectors)
+        potential_radii = (
+            radii.copy()
+            if self.potential_sphere_radii is None
+            else np.asarray(self.potential_sphere_radii, dtype=np.float64)
+        )
+        if potential_radii.shape != radii.shape:
+            raise ValueError("potential_sphere_radii must contain one value per site")
+        if np.any(potential_radii < radii - 1.0e-12):
+            raise ValueError(
+                "potential sphere radii must not be smaller than the hard-sphere radii"
+            )
+        if self.settings.reference_potential != "omt" and np.any(
+            potential_radii > radii + 1.0e-12
+        ):
+            raise ValueError(
+                "potential spheres beyond the hard spheres require reference_potential='omt'"
+            )
+        object.__setattr__(self, "potential_sphere_radii", potential_radii)
         dataset = (
             detect(lattice, positions, numbers, symprec=self.settings.symprec)
             if self.settings.symmetry
@@ -248,8 +301,14 @@ class NmtoScfInput:
         radial_equations: Sequence[str],
         settings: NmtoScfSettings,
         checkpoint: object | None = None,
+        potential_sphere_radii: Sequence[float] | None = None,
     ) -> NmtoScfInput:
-        """Prepare an input without serializing a checkpoint or SCF TOML file."""
+        """Prepare an input without serializing a checkpoint or SCF TOML file.
+
+        ``potential_sphere_radii`` are the overlapping-muffin-tin potential
+        radii ``s``; they default to the hard-sphere radii and must be exact
+        points of each site's exponential radial mesh when larger.
+        """
 
         return cls(
             native=native,
@@ -267,6 +326,11 @@ class NmtoScfInput:
             radial_equations=tuple(radial_equations),
             settings=settings,
             checkpoint=checkpoint,
+            potential_sphere_radii=(
+                None
+                if potential_sphere_radii is None
+                else np.asarray(potential_sphere_radii, dtype=np.float64)
+            ),
         )
 
     @classmethod
@@ -326,6 +390,12 @@ class NmtoScfInput:
             radial_equations=geometry["radial_equations"],
             settings=settings,
             checkpoint=checkpoint,
+            potential_sphere_radii=resolve_potential_sphere_radii(
+                settings,
+                geometry["site_ids"],
+                geometry["muffin_tin_radii"],
+                geometry["structure"]["radial_meshes"],
+            ),
         )
 
 
@@ -339,6 +409,36 @@ def _single_dft_scf_task(document: Mapping[str, Any]) -> Mapping[str, Any]:
     if len(selected) != 1:
         raise ValueError(f"expected exactly one dft-scf task, found {len(selected)}")
     return selected[0]
+
+
+def resolve_potential_sphere_radii(
+    settings: NmtoScfSettings,
+    site_ids: Sequence[str],
+    muffin_tin_radii: Sequence[float],
+    radial_meshes: Sequence[tuple[float, float, int]],
+) -> FloatArray:
+    """Return per-site potential radii snapped up to each exponential mesh.
+
+    A species entry in ``settings.potential_radii`` (keyed by the site-id
+    prefix before ``-``) takes precedence over ``potential_radius_scale``
+    times the hard-sphere radius.  Requests not above the hard sphere leave
+    the site without a shell; larger requests are rounded up to the next
+    native mesh point so the shell knots are mesh points.
+    """
+
+    hard = np.asarray(muffin_tin_radii, dtype=np.float64)
+    resolved = hard.copy()
+    for site, site_id in enumerate(site_ids):
+        species = str(site_id).split("-", 1)[0]
+        requested = (
+            settings.potential_radii[species]
+            if settings.potential_radii is not None and species in settings.potential_radii
+            else settings.potential_radius_scale * hard[site]
+        )
+        if requested > hard[site] + 1.0e-12:
+            first, increment, _ = radial_meshes[site]
+            resolved[site] = snap_to_exponential_mesh(float(first), float(increment), float(requested))
+    return resolved
 
 
 def _validate_symmetry_layout(scf_input: NmtoScfInput) -> None:
@@ -375,6 +475,11 @@ def _validate_symmetry_layout(scf_input: NmtoScfInput) -> None:
                 or abs(
                     scf_input.muffin_tin_radii[source]
                     - scf_input.muffin_tin_radii[target]
+                )
+                > scf_input.settings.symprec
+                or abs(
+                    scf_input.potential_sphere_radii[source]
+                    - scf_input.potential_sphere_radii[target]
                 )
                 > scf_input.settings.symprec
                 or scf_input.radial_equations[source]
@@ -467,6 +572,8 @@ class NmtoScfResult:
     energy_history: FloatArray
     convergence_history: FloatArray
     valence_normalization_history: FloatArray
+    reference_constant_history: FloatArray
+    reference_rms_history: FloatArray
     k_sampling: IrreducibleKMesh | None
     _restart_checkpoint: object | None
 
@@ -482,6 +589,8 @@ class _NmtoIteration:
     occupations: NmtoOccupations
     output_density: object | None
     valence_normalization: float
+    reference_constant: float = np.nan
+    reference_rms: float = np.nan
 
 
 def _record_scf_timing(
@@ -526,6 +635,8 @@ def run_nmto_scf(
     energy_history = []
     convergence_history = []
     valence_normalization_history = []
+    reference_constant_history = []
+    reference_rms_history = []
     for iteration in range(1, settings.max_iterations + 1):
         context = nullcontext(None) if comm is None else NmtoParallel(comm)
         with context as parallel:
@@ -580,6 +691,8 @@ def run_nmto_scf(
                 timing_callback, iteration, "nmto", started, parallel
             )
             valence_normalization_history.append(current.valence_normalization)
+            reference_constant_history.append(current.reference_constant)
+            reference_rms_history.append(current.reference_rms)
             iteration_state = None
             started = perf_counter()
             stage = nullcontext() if parallel is None else parallel.local_stage()
@@ -635,6 +748,8 @@ def run_nmto_scf(
                                     scf_input,
                                     iteration,
                                     total,
+                                    reference_constant=current.reference_constant,
+                                    reference_rms=current.reference_rms,
                                 ),
                             )
                 if not root:
@@ -652,6 +767,8 @@ def run_nmto_scf(
                     valence_normalization_history=np.asarray(
                         valence_normalization_history
                     ),
+                    reference_constant_history=np.asarray(reference_constant_history),
+                    reference_rms_history=np.asarray(reference_rms_history),
                     k_sampling=scf_input.k_mesh_reduction,
                     _restart_checkpoint=restart_checkpoint,
                 )
@@ -670,10 +787,69 @@ def run_nmto_scf(
     )
 
 
+def recipe_annotations(scf_input: NmtoScfInput) -> dict[str, str]:
+    """Describe the method recipe actually executed by :func:`run_nmto_scf`.
+
+    Every entry names one construction choice so that two "FP-NMTO" runs can
+    be told apart from their checkpoints alone: the reference potential and
+    its constant, the roles played by each sphere radius, the envelope,
+    augmentation, field representation, Coulomb solver, and full-potential
+    matrix scheme.
+    """
+
+    settings = scf_input.settings
+    centers = scf_input.fractional_positions @ scf_input.lattice
+    hard = scf_input.muffin_tin_radii
+    potential = scf_input.potential_sphere_radii
+    omt = settings.reference_potential == "omt"
+    shells = bool(np.any(potential > hard + 1.0e-12))
+    return {
+        "nmto.recipe.family": "fp-nmto",
+        "nmto.recipe.reference_potential": (
+            "omt-shells" if omt else "spherical-mt"
+        ),
+        "nmto.recipe.reference_constant": (
+            "least-squares" if omt else "interstitial-g0"
+        ),
+        "nmto.recipe.hard_sphere_radii_bohr": ",".join(repr(float(r)) for r in hard),
+        "nmto.recipe.potential_sphere_radii_bohr": ",".join(
+            repr(float(r)) for r in potential
+        ),
+        "nmto.recipe.hard_sphere_roles": (
+            "usw-hard-sphere,kink-sphere,augmentation-partition,regional-field-boundary"
+        ),
+        "nmto.recipe.nearest_neighbor_bohr": repr(
+            nearest_neighbor_distance(scf_input.lattice, centers)
+        ),
+        "nmto.recipe.hard_sphere_max_overlap": repr(
+            float(np.max(overlap_fractions(scf_input.lattice, centers, hard)))
+        ),
+        "nmto.recipe.potential_sphere_max_overlap": repr(
+            float(np.max(overlap_fractions(scf_input.lattice, centers, potential)))
+        ),
+        "nmto.recipe.envelope": "periodic-usw-hard-sphere",
+        "nmto.recipe.augmentation": (
+            "single-hard-sphere+additive-shells" if shells else "single-hard-sphere"
+        ),
+        "nmto.recipe.energy_nodes_hartree": ",".join(
+            repr(float(e)) for e in settings.energy_mesh
+        ),
+        "nmto.recipe.l_max": str(settings.l_max),
+        "nmto.recipe.field_representation": "regional-mt-harmonics+interstitial-fourier",
+        "nmto.recipe.coulomb": "libmuffintin-regional",
+        "nmto.recipe.full_potential_matrix": "direct-quadrature",
+        "nmto.recipe.relativity": ",".join(scf_input.radial_equations),
+        "nmto.recipe.xc": settings.xc,
+    }
+
+
 def _checkpoint_annotations(
     scf_input: NmtoScfInput,
     iterations: int,
     total_energy: float,
+    *,
+    reference_constant: float = np.nan,
+    reference_rms: float = np.nan,
 ) -> dict[str, str]:
     annotations = {
         "nmto.scf.iterations": str(iterations),
@@ -681,6 +857,11 @@ def _checkpoint_annotations(
         "scf.k_sampling.divisions": ",".join(map(str, scf_input.settings.k_mesh)),
         "scf.k_sampling.shift": ",".join(map(str, scf_input.settings.k_shift)),
     }
+    annotations.update(recipe_annotations(scf_input))
+    if np.isfinite(reference_constant):
+        annotations["nmto.scf.reference_constant_hartree"] = repr(float(reference_constant))
+    if np.isfinite(reference_rms):
+        annotations["nmto.scf.reference_fit_rms_hartree"] = repr(float(reference_rms))
     reduction = scf_input.k_mesh_reduction
     if reduction is None:
         annotations["scf.k_sampling.kind"] = "full"
@@ -737,7 +918,37 @@ def _solve_nmto_iteration(
         for l in range(settings.l_max + 1)
         for m in range(-l, l + 1)
     )
-    if parallel is None:
+    reference = None
+    potential_samples = None
+    reference_rms = np.nan
+    if settings.reference_potential == "omt":
+        started = perf_counter()
+        (
+            reference,
+            radial_samples,
+            jets,
+            interstitial_zero,
+            potential_samples,
+        ) = sample_omt_radials(
+            scf_input.native,
+            potential,
+            scf_input.radial_equations,
+            settings.energy_mesh,
+            settings.l_max,
+            channels,
+            direct,
+            scf_input.fractional_positions,
+            scf_input.muffin_tin_radii,
+            scf_input.potential_sphere_radii,
+            settings.matrix_angular_order,
+            parallel=parallel,
+            timing=timing,
+        )
+        reference_rms = reference.diagnostics.weighted_rms
+        exported_potential = None
+        if parallel is None and timing is not None:
+            timing("radial", perf_counter() - started)
+    elif parallel is None:
         started = perf_counter()
         radial_samples, jets = _current_radials(scf_input, potential, channels)
         if timing is not None:
@@ -838,6 +1049,7 @@ def _solve_nmto_iteration(
             if scf_input.k_mesh_reduction is None
             else scf_input.k_mesh_reduction.active_operation_indices
         ),
+        potential_sphere_radii=scf_input.potential_sphere_radii,
     )
     started = perf_counter()
     corrections = full_potential_corrections(
@@ -846,6 +1058,8 @@ def _solve_nmto_iteration(
         interstitial_zero,
         angular_order=settings.matrix_angular_order,
         parallel=parallel,
+        reference=reference,
+        samples=potential_samples,
     )
     if parallel is None:
         if timing is not None:
@@ -926,7 +1140,12 @@ def _solve_nmto_iteration(
             if parallel.rank == 0 and timing is not None:
                 timing("nmto.density.normalization", perf_counter() - started)
     return _NmtoIteration(
-        bands, occupations, output_density, valence_normalization
+        bands,
+        occupations,
+        output_density,
+        valence_normalization,
+        reference_constant=float(interstitial_zero),
+        reference_rms=float(reference_rms),
     )
 
 

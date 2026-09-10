@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from time import perf_counter
-from typing import Callable, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 
 import numpy as np
 
@@ -12,6 +13,10 @@ from .density import ScalarRadialSamples
 from .kink import BoundaryJets
 from .parallel import NmtoParallel
 from .usw import RealHarmonic
+
+if TYPE_CHECKING:
+    from .full_potential import PotentialSamples
+    from .omt import OmtShellReference
 
 
 PhaseTiming = Callable[[str, float], None]
@@ -479,3 +484,245 @@ def sample_nmto_radials(
         energy_inverse_masses=np.stack(energy_inverse_masses, axis=1),
     )
     return radial_samples, jets, interstitial_zero
+
+
+def sample_omt_radials(
+    native: object,
+    potential: object | None,
+    radial_equations: Sequence[str],
+    energy_mesh: Sequence[float],
+    l_max: int,
+    channels: tuple[RealHarmonic, ...],
+    direct_lattice: FloatArray,
+    site_fractional: FloatArray,
+    muffin_tin_radii: FloatArray,
+    potential_sphere_radii: FloatArray,
+    angular_order: int,
+    *,
+    parallel: NmtoParallel | None = None,
+    timing: PhaseTiming | None = None,
+) -> tuple[
+    OmtShellReference,
+    dict[tuple[int, int], ScalarRadialSamples],
+    BoundaryJets,
+    float,
+    PotentialSamples | None,
+]:
+    """Fit the overlapping-muffin-tin reference and solve its radial wells.
+
+    Rank zero reconstructs the full potential on the fixed quadrature, fits
+    the constant and the shell tails, and extends every site's exponential
+    mesh to its potential radius with the fitted tail appended to the exact
+    spherical average.  The native solver then integrates each ``(site, l,
+    energy)`` well on the extended mesh; the free continuation back to the
+    hard sphere supplies the kink jets and the shell functions.  The returned
+    constant replaces the interstitial ``G=0`` reference, and the raw
+    potential samples are returned on rank zero for the matrix corrections.
+    """
+
+    from .full_potential import sample_potential_fields
+    from .omt import fit_omt_shells
+    from .shell import (
+        continuation_jets,
+        exponential_mesh,
+        exponential_mesh_count,
+        free_continuation,
+    )
+
+    root = parallel is None or parallel.rank == 0
+    hard = np.asarray(muffin_tin_radii, dtype=np.float64)
+    outer = np.asarray(potential_sphere_radii, dtype=np.float64)
+    energies = np.asarray(energy_mesh, dtype=np.float64)
+    site_count = len(hard)
+    equations = tuple(radial_equations)
+    reference = None
+    samples = None
+    scalars = None
+    extended_potentials = None
+    started = perf_counter()
+    stage = nullcontext() if parallel is None else parallel.local_stage()
+    with stage:
+        if root:
+            blocks = native.prepare_scalar_radial_blocks(potential)
+            export = potential.export_interstitial()
+            samples = sample_potential_fields(
+                direct_lattice, site_fractional, hard, channels, export, angular_order
+            )
+            site_offsets = np.asarray(blocks["site_offsets"], dtype=np.int64)
+            firsts = np.asarray(blocks["mesh_first"], dtype=np.float64)
+            increments = np.asarray(blocks["mesh_increment"], dtype=np.float64)
+            counts = np.asarray(blocks["mesh_count"], dtype=np.int64)
+            potential_values = np.asarray(blocks["potential_values"], dtype=np.float64)
+            extended_counts = []
+            knots = []
+            native_potentials = []
+            for site in range(site_count):
+                count = int(counts[site])
+                first = float(firsts[site])
+                increment = float(increments[site])
+                extended = (
+                    exponential_mesh_count(first, increment, float(outer[site]))
+                    if outer[site] > hard[site]
+                    else count
+                )
+                if extended < count:
+                    raise ValueError("potential sphere radius lies inside the native mesh")
+                mesh = exponential_mesh(first, increment, extended)
+                if abs(mesh[count - 1] - hard[site]) > 1.0e-8 * max(1.0, hard[site]):
+                    raise ValueError(
+                        f"site {site}: native mesh radius {mesh[count - 1]!r} differs from "
+                        f"the hard-sphere radius {hard[site]!r}"
+                    )
+                extended_counts.append(extended)
+                knots.append(mesh[count - 1 :])
+                native_potentials.append(
+                    potential_values[int(site_offsets[site]) : int(site_offsets[site + 1])]
+                )
+            reference = fit_omt_shells(
+                lattice=np.asarray(direct_lattice, dtype=np.float64),
+                centers=samples.site_centers,
+                hard_radii=hard,
+                potential_radii=outer,
+                shell_knots=knots,
+                hard_sphere_values=np.asarray([values[-1] for values in native_potentials]),
+                interstitial_points=samples.interstitial_points,
+                interstitial_values=samples.interstitial_values,
+                interstitial_weights=np.full(
+                    len(samples.interstitial_values), samples.volume_weight
+                ),
+                sphere_points=np.concatenate(
+                    [samples.sphere_points(site) for site in range(site_count)]
+                ),
+                sphere_residuals=np.concatenate(
+                    [
+                        (
+                            samples.full_potential[site]
+                            - samples.spherical[site][:, None]
+                        ).reshape(-1)
+                        for site in range(site_count)
+                    ]
+                ),
+                sphere_weights=np.concatenate(
+                    [samples.sphere_weights(site) for site in range(site_count)]
+                ),
+            )
+            extended_potentials = np.concatenate(
+                [
+                    np.concatenate(
+                        (
+                            native_potentials[site],
+                            reference.constant + reference.shell_values[site][1:],
+                        )
+                    )
+                    if reference.has_shell(site)
+                    else native_potentials[site]
+                    for site in range(site_count)
+                ]
+            )
+            scalars = {
+                "firsts": firsts.tolist(),
+                "increments": increments.tolist(),
+                "counts": counts.tolist(),
+                "extended_counts": extended_counts,
+            }
+    if parallel is not None:
+        reference = parallel.comm.bcast(reference, root=0)
+        scalars = parallel.comm.bcast(scalars, root=0)
+        extended_potentials = parallel.broadcast_array(extended_potentials)
+    _record_timing(timing, "radial.reference", started, parallel)
+
+    counts = scalars["counts"]
+    extended_counts = scalars["extended_counts"]
+    potential_offsets = np.cumsum((0, *extended_counts))
+    tasks = [
+        (site, l, energy_index)
+        for site in range(site_count)
+        for l in range(l_max + 1)
+        for energy_index in range(len(energies))
+    ]
+    task_offsets = [0]
+    for site, _, _ in tasks:
+        task_offsets.append(task_offsets[-1] + int(extended_counts[site]))
+    radial_spans = [
+        (task_offsets[task], task_offsets[task + 1]) for task in range(len(tasks))
+    ]
+    task_rows = [(task, task + 1) for task in range(len(tasks))]
+    if parallel is None:
+        large = np.zeros(task_offsets[-1])
+        small = np.zeros(task_offsets[-1])
+        inverse_mass = np.zeros(task_offsets[-1])
+        boundary_jets = np.zeros((len(tasks), 7))
+        owned = range(len(tasks))
+    else:
+        large = parallel.shared_array((task_offsets[-1],), np.float64)
+        small = parallel.shared_array((task_offsets[-1],), np.float64)
+        inverse_mass = parallel.shared_array((task_offsets[-1],), np.float64)
+        boundary_jets = parallel.shared_array((len(tasks), 7), np.float64)
+        owned = parallel.indices(len(tasks))
+    started = perf_counter()
+    stage = nullcontext() if parallel is None else parallel.local_stage()
+    with stage:
+        for task in owned:
+            site, l, energy_index = tasks[task]
+            radial_start, radial_stop = radial_spans[task]
+            native.solve_scalar_radial_block(
+                extended_potentials[
+                    int(potential_offsets[site]) : int(potential_offsets[site + 1])
+                ],
+                float(scalars["firsts"][site]),
+                float(scalars["increments"][site]),
+                site,
+                equations[site],
+                l,
+                float(energies[energy_index]),
+                large[radial_start:radial_stop],
+                small[radial_start:radial_stop],
+                inverse_mass[radial_start:radial_stop],
+                boundary_jets[task],
+            )
+    if parallel is not None:
+        parallel.publish_blocks(large, radial_spans)
+        parallel.publish_blocks(small, radial_spans)
+        parallel.publish_blocks(inverse_mass, radial_spans)
+        parallel.publish_blocks(boundary_jets, task_rows)
+    _record_timing(timing, "radial.solve", started, parallel)
+
+    kinetic_energies = energies - reference.constant
+    radial_samples: dict[tuple[int, int], ScalarRadialSamples] = {}
+    continuations = {}
+    task = 0
+    for site in range(site_count):
+        count = int(counts[site])
+        extended = int(extended_counts[site])
+        mesh = exponential_mesh(
+            float(scalars["firsts"][site]), float(scalars["increments"][site]), extended
+        )
+        for l in range(l_max + 1):
+            first = task
+            start = task_offsets[first]
+            task += len(energies)
+            stop = task_offsets[task]
+            continuation = free_continuation(
+                l,
+                kinetic_energies,
+                float(hard[site]),
+                float(outer[site]) if reference.has_shell(site) else float(hard[site]),
+                mesh[count - 1 :],
+                boundary_jets[first:task, :6],
+            )
+            continuations[site, l] = continuation
+            radial_samples[site, l] = ScalarRadialSamples(
+                mesh_radii=mesh,
+                large=large[start:stop].reshape(len(energies), extended),
+                small=small[start:stop].reshape(len(energies), extended),
+                boundary_values=continuation.boundary_values,
+                inverse_mass=inverse_mass[start:stop].reshape(len(energies), extended),
+                inverse_speed_of_light=float(boundary_jets[first, 6]),
+                hard_radius=float(hard[site]),
+                shell_start=count - 1,
+                shell_free_large=continuation.values,
+            )
+    jets = continuation_jets(
+        [continuations[site, channel.l] for site in range(site_count) for channel in channels]
+    )
+    return reference, radial_samples, jets, float(reference.constant), samples

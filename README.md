@@ -117,13 +117,18 @@ sum. `vd` forms four-energy divided differences, the four super-unitary
 functions through third radial derivative, and the minimum-norm fifth-energy
 constraint weights used for open structures.
 
-`omt` fits a periodic constant plus continuous radial hats and reports the
-potential-sphere overlap/error curve. `kink` consumes screened slopes and the
-exact radial boundary energy jets exported by `libmuffintin`, while `nmto`
-forms ordinary and confluent matrix divided differences, active-channel Schur
-downfolding, and strict Löwdin-orthogonalized Hamiltonians. All required
-square systems use `tensor.solve`/`tensor.inv`; the V&D and NMTO constructions
-never replace invertibility with a pseudoinverse.
+`omt` is the overlapping-muffin-tin (Andersen's OMTA, not "optimized")
+potential construction: `fit_omt` fits a periodic constant plus continuous
+radial hats and reports the potential-sphere overlap/error curve, and
+`fit_omt_shells` is the pinned-interior variant used by `run_nmto_scf`.
+`shell` extends the radial mesh into overlapping potential shells and
+back-extrapolates free waves to the hard spheres. `kink` consumes screened
+slopes and the exact radial boundary energy jets exported by `libmuffintin`,
+while `nmto` forms ordinary and confluent matrix divided differences,
+active-channel Schur downfolding, and strict Löwdin-orthogonalized
+Hamiltonians. All required square systems use `tensor.solve`/`tensor.inv`;
+the V&D and NMTO constructions never replace invertibility with a
+pseudoinverse.
 
 The independent `run_nmto_scf` path uses periodic spherical-boundary Green
 operators, not inverse-first finite-cluster Bloch folding. A negative-reference
@@ -150,6 +155,48 @@ potential matrix before solving bands and occupations, including the spherical
 potential acting on inactive free partial waves. `matrix-angular-order`
 controls sphere quadrature. Select `[task.scf.mixing] kind = "linear"` or
 `"pulay"`; Pulay also requires `history`. Both retain the specified `beta`.
+
+### Production recipe
+
+`run_nmto_scf` executes exactly one construction, and every checkpoint it
+writes records it as `nmto.recipe.*` annotations (see `recipe_annotations`),
+so two "FP-NMTO" results can be told apart without reading the call chain.
+The laboratory modules `vd` and `coulomb.*` are **not** on this path: the
+density and potential live in the `libmuffintin` regional field (muffin-tin
+harmonics plus interstitial Fourier components) and the Coulomb problem is
+solved by the native regional solver.
+
+| Dimension | `reference-potential = "spherical-mt"` (default) | `reference-potential = "omt"` |
+|---|---|---|
+| Reference potential | spherical average inside each hard sphere, constant `V_I(G=0)` outside | overlapping wells: the same spherical average inside the hard sphere `a`, a least-squares piecewise-linear tail on `a < r <= s`, and a least-squares constant `V0` |
+| Sphere radii | one radius `a` per site plays every role: USW hard sphere, kink sphere, augmentation partition, regional-field boundary | the same `a`, plus potential radii `s >= a` that may overlap |
+| Radial functions | native solve to `a`; kink jets at `a` | native solve of the well to `s`; free continuation `u0` back to `a` matching value and mass-weighted flux at `s`; kink jets from `u0` at `a` |
+| Augmentation | own active partial wave inside the own hard sphere, envelope elsewhere | additionally `(u-u0)/u0(a)` on every shell, additive across overlapping shells and into other hard spheres |
+| Full-potential matrix | direct quadrature of `V - V_ref` per orbital piece | the same, with `V - V0 - v_R` for every well piece wherever it lives; the `-v_R` shell terms use a per-site shell quadrature (Gauss--Legendre between the tail knots times the sphere angular rule) |
+| Envelope, kink matrix, NMTO order, Löwdin, density, Coulomb | periodic hard-sphere USW; unchanged | unchanged |
+
+With `s = a` the OMT recipe reproduces the default construction except for
+the reference constant. Requested potential radii are rounded up to the
+next native exponential-mesh point so the tail knots are mesh points:
+
+```toml
+[task.scf.nmto]
+reference-potential = "omt"
+potential-radius-scale = 1.2      # s = 1.2 a for every site, or per species:
+[task.scf.nmto.potential-radii]
+C = 1.75                           # bohr, keyed by the site-id prefix
+```
+
+The reference Hamiltonian and overlap still come from the kink formalism,
+which treats each shell function as an exact solution of its own well. In
+an overlap region that is Andersen's usual OMTA approximation, of second
+order in the potential overlap; the explicit `V - V_ref` matrix corrects the
+potential, not that kinetic-energy error. Hard spheres must not overlap in
+either recipe. Results carry `nmto.scf.reference_constant_hartree`, the fit
+RMS `nmto.scf.reference_fit_rms_hartree`, the nearest-neighbour distance,
+and the maximum hard- and potential-sphere overlap fractions;
+`NmtoScfResult` keeps `reference_constant_history` and
+`reference_rms_history` per iteration.
 
 The energy convention is Hartree throughout, with the wave equation written as
 `(-nabla^2/2 - E) psi = 0`. The finite-cluster constant-density regression uses

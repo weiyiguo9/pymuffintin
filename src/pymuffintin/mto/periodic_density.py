@@ -23,6 +23,7 @@ from .density import ScalarRadialSamples
 from .electrons import NmtoBands, NmtoOccupations, interpolate_nmto_basis, nmto_density_matrices
 from .nmto import NmtoResult
 from .periodic import PeriodicUswSample
+from .shell import sphere_images
 from .usw import RealHarmonic
 
 
@@ -114,6 +115,47 @@ def _free_radial_ratio(l: int, energy: float, radii: FloatArray, boundary: float
     return (radii / boundary) ** l
 
 
+def nearest_sites(
+    points: FloatArray,
+    direct_lattice: FloatArray,
+    site_fractional: FloatArray,
+    radii: FloatArray,
+) -> tuple[FloatArray, NDArray[np.int64]]:
+    """Locate the unique containing hard sphere of each point, or ``-1``.
+
+    Hard spheres must not overlap; the closest sphere whose radius contains
+    the point wins.  Displacements are Cartesian ``r - R - T``.
+    """
+
+    inverse_lattice = np.linalg.inv(direct_lattice)
+    fractional = np.mod(points @ inverse_lattice, 1.0)
+    bounds = np.ceil(
+        np.max(radii) * np.linalg.norm(inverse_lattice, axis=0)
+    ).astype(int)
+    translations = np.asarray(
+        tuple(product(*(range(-bound, bound + 1) for bound in bounds))), dtype=float
+    )
+    best_distance = np.full(len(points), np.inf)
+    best_displacement = np.zeros_like(points)
+    best_site = np.full(len(points), -1, dtype=np.int64)
+    for site, position in enumerate(site_fractional):
+        candidates = (
+            fractional[:, None, :] - np.mod(position, 1.0)[None, None, :]
+            - translations[None, :, :]
+        ) @ direct_lattice
+        distances = np.linalg.norm(candidates, axis=2)
+        images = np.argmin(distances, axis=1)
+        rows = np.arange(len(points))
+        site_distances = distances[rows, images]
+        replace = (site_distances <= radii[site]) & (
+            site_distances < best_distance
+        )
+        best_distance[replace] = site_distances[replace]
+        best_displacement[replace] = candidates[rows[replace], images[replace]]
+        best_site[replace] = site
+    return best_displacement, best_site
+
+
 @dataclass(frozen=True)
 class PeriodicNmtoBasisEvaluator:
     """One common periodic orbital representation for bands and density.
@@ -139,6 +181,7 @@ class PeriodicNmtoBasisEvaluator:
     radial_samples: Mapping[tuple[int, int], ScalarRadialSamples]
     symmetry: SymmetryDataset | None
     symmetry_operation_indices: NDArray[np.int64] | None = None
+    potential_sphere_radii: FloatArray | None = None
 
     def density(self, points: FloatArray) -> FloatArray:
         """Evaluate the symmetry-projected scalar valence density."""
@@ -182,6 +225,29 @@ class PeriodicNmtoBasisEvaluator:
     def _basis_values(self, points: FloatArray, k_index: int) -> tuple[ComplexArray, ComplexArray]:
         """Evaluate augmented energy-node orbitals before NMTO interpolation."""
 
+        large, small, _ = self._basis_values_and_shell_pieces(points, k_index)
+        return large, small
+
+    def _basis_values_and_shell_pieces(
+        self, points: FloatArray, k_index: int
+    ) -> tuple[
+        ComplexArray,
+        ComplexArray,
+        tuple[tuple[int, NDArray[np.int64], FloatArray, ComplexArray, ComplexArray], ...],
+    ]:
+        """Evaluate augmented orbitals and the shell well pieces they contain.
+
+        Inside its hard sphere every orbital's own active partial wave
+        replaces the regular free continuation of the envelope.  When
+        potential spheres extend beyond the hard spheres, each shell image
+        containing a point adds ``(u - u0)/u0(a)`` of that site's radial
+        solutions; shells of different sites add independently and may
+        penetrate other hard spheres.  The third result lists
+        ``(site, indices, distances, piece_large, piece_small)`` per shell
+        image: the interpolated ``u/u0(a)`` part of the orbitals there,
+        whose reference potential is that site's spherical well.
+        """
+
         sample_points = np.asarray(points, dtype=np.float64)
         samples = self.periodic_samples[k_index]
         reference_values = samples[0].geometry.reference_values(sample_points)
@@ -224,42 +290,84 @@ class PeriodicNmtoBasisEvaluator:
                         channel.l, float(energy), radii, float(self.muffin_tin_radii[site])
                     )
                     large_nodes[node, selected, column] += phase * angular[:, local] * (atomic_large - regular)
-                    small_nodes[node, selected, 0, column] = phase * angular[:, local] * atomic_small
-                    small_nodes[node, selected, 1:, column] = (
+                    small_nodes[node, selected, 0, column] += phase * angular[:, local] * atomic_small
+                    small_nodes[node, selected, 1:, column] += (
                         (phase * tangential)[:, None] * angular_gradients[:, :, local]
                     )
+        shell_nodes = []
+        if self.potential_sphere_radii is not None and np.any(
+            np.asarray(self.potential_sphere_radii) > self.muffin_tin_radii
+        ):
+            for site, indices, shell_displacements in sphere_images(
+                sample_points,
+                self.direct_lattice,
+                site_cartesian,
+                self.muffin_tin_radii,
+                self.potential_sphere_radii,
+            ):
+                if not self.radial_samples[(site, self.channels[0].l)].has_shell:
+                    continue
+                radii = np.linalg.norm(shell_displacements, axis=1)
+                angular, angular_gradients = _angular_values_and_gradients(
+                    shell_displacements, self.channels
+                )
+                image_translations = (
+                    sample_points[indices] - shell_displacements - site_cartesian[site]
+                )
+                phase = np.exp(1j * (image_translations @ self.k_cartesian[k_index]))
+                piece_large = np.zeros(
+                    (len(samples), len(indices), large_nodes.shape[-1]), dtype=np.complex128
+                )
+                piece_small = np.zeros(
+                    (len(samples), len(indices), 4, large_nodes.shape[-1]), dtype=np.complex128
+                )
+                for local, channel in enumerate(self.channels):
+                    radial = self.radial_samples[(site, channel.l)]
+                    column = site * len(self.channels) + local
+                    clipped = np.clip(radii, radial.mesh_radii[0], radial.mesh_radii[-1])
+                    difference_rows = radial.shell_interpolant(clipped)
+                    large_rows = radial.large_interpolant(clipped)
+                    small_rows = radial.small_interpolant(clipped)
+                    tangential_rows = radial.tangential_interpolant(clipped)
+                    for node in range(len(samples)):
+                        boundary = radial.boundary_values[node]
+                        angular_phase = phase * angular[:, local]
+                        np.add.at(
+                            large_nodes,
+                            (node, indices, column),
+                            angular_phase * difference_rows[node] / boundary,
+                        )
+                        piece_large[node, :, column] = angular_phase * large_rows[node] / boundary
+                        radial_small = angular_phase * small_rows[node] / boundary
+                        tangential = (phase * tangential_rows[node] / boundary)[:, None] * (
+                            angular_gradients[:, :, local]
+                        )
+                        np.add.at(small_nodes, (node, indices, 0, column), radial_small)
+                        np.add.at(small_nodes, (node, indices, slice(1, None), column), tangential)
+                        piece_small[node, :, 0, column] = radial_small
+                        piece_small[node, :, 1:, column] = tangential
+                shell_nodes.append((site, indices, radii, piece_large, piece_small))
         lagrange = self.results[k_index].lagrange_matrices
         large = interpolate_nmto_basis(large_nodes, lagrange)
         small = contract("epca,eab->pcb", small_nodes, lagrange)
-        return large, small
+        pieces = tuple(
+            (
+                site,
+                indices,
+                radii,
+                interpolate_nmto_basis(piece_large, lagrange),
+                contract("epca,eab->pcb", piece_small, lagrange),
+            )
+            for site, indices, radii, piece_large, piece_small in shell_nodes
+        )
+        return large, small, pieces
 
     def _nearest_sites(self, points: FloatArray) -> tuple[FloatArray, NDArray[np.int64]]:
-        """Locate the containing sphere in the periodic primitive cell."""
+        """Locate the containing hard sphere in the periodic primitive cell."""
 
-        inverse_lattice = np.linalg.inv(self.direct_lattice)
-        fractional = np.mod(points @ inverse_lattice, 1.0)
-        bounds = np.ceil(
-            np.max(self.muffin_tin_radii) * np.linalg.norm(inverse_lattice, axis=0)
-        ).astype(int)
-        translations = np.asarray(
-            tuple(product(*(range(-bound, bound + 1) for bound in bounds))), dtype=float
+        return nearest_sites(
+            np.asarray(points, dtype=np.float64),
+            self.direct_lattice,
+            self.site_fractional,
+            self.muffin_tin_radii,
         )
-        best_distance = np.full(len(points), np.inf)
-        best_displacement = np.zeros_like(points)
-        best_site = np.full(len(points), -1, dtype=np.int64)
-        for site, position in enumerate(self.site_fractional):
-            candidates = (
-                fractional[:, None, :] - np.mod(position, 1.0)[None, None, :]
-                - translations[None, :, :]
-            ) @ self.direct_lattice
-            distances = np.linalg.norm(candidates, axis=2)
-            images = np.argmin(distances, axis=1)
-            rows = np.arange(len(points))
-            site_distances = distances[rows, images]
-            replace = (site_distances <= self.muffin_tin_radii[site]) & (
-                site_distances < best_distance
-            )
-            best_distance[replace] = site_distances[replace]
-            best_displacement[replace] = candidates[rows[replace], images[replace]]
-            best_site[replace] = site
-        return best_displacement, best_site

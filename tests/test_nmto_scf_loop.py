@@ -148,5 +148,7 @@ def test_nmto_scf_mixes_until_energy_and_density_converge(monkeypatch, use_mpi, 
     np.testing.assert_allclose(result.energy_history, [-1.1, -1.0])
     assert calls == [None, -1.1]
     np.testing.assert_allclose(result.valence_normalization_history, [1.0, 1.0])
+    assert result.reference_constant_history.shape == (2,)
+    assert result.reference_rms_history.shape == (2,)
     assert result.k_sampling is None
     assert result._restart_checkpoint is None
